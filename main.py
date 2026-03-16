@@ -117,28 +117,44 @@ def get_emails(
         filters = config.get("filters", {})
         allowed_senders = filters.get("allowed_senders", [])
 
+        # 日期过滤：获取今天和昨天的邮件（美股盘前逻辑）
+        from datetime import datetime, timedelta
+
+        # 获取北京时间
+        now_bj = datetime.now()
+        today = now_bj.date()
+        yesterday = today - timedelta(days=1)
+
+        logger.info(f"📅 日期过滤: {yesterday.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')} (北京时间)")
+        logger.info(f"🔍 发件人过滤: {allowed_senders}")
+
         with MailBox(source, timeout=30).login(email_addr, email_pass) as mailbox:
             emails = []
-            for msg in mailbox.fetch(limit=limit, reverse=True):
-                from_addr = str(msg.from_)
 
-                # 过滤：如果配置了允许列表，只保留匹配的邮件
+            # 获取更多邮件以便过滤（默认取50封）
+            fetch_limit = max(limit * 5, 50)
+
+            for msg in mailbox.fetch(limit=fetch_limit, reverse=True):
+                from_addr = str(msg.from_)
+                msg_date = msg.date.date() if msg.date else None
+
+                # 日期过滤：只保留今天和昨天的邮件
+                if msg_date and msg_date not in [today, yesterday]:
+                    continue
+
+                # 发件人过滤：如果配置了允许列表，只保留匹配的邮件
                 if allowed_senders:
-                    # 提取邮箱地址
                     email_match = re.search(r'<(.+?)>|^(.+?)$', from_addr)
                     if email_match:
                         email_addr = email_match.group(1) or email_match.group(2)
-                        # 检查是否匹配（支持后缀@xxx.com 或完整邮箱xxx@xxx.com）
                         matched = False
                         for s in allowed_senders:
                             s_lower = s.lower()
                             if s_lower.startswith('@'):
-                                # 后缀匹配
                                 if email_addr.lower().endswith(s_lower):
                                     matched = True
                                     break
                             else:
-                                # 完整邮箱匹配
                                 if email_addr.lower() == s_lower:
                                     matched = True
                                     break
