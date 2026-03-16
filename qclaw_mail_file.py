@@ -311,7 +311,7 @@ def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[s
 1. **语言：必须使用简体中文（中文），包括所有标题、正文、术语**
 2. 文件名格式: AI_Morning_Brief_{{日期}}.html
 3. 必须严格按照格式规范生成 HTML
-4. 排序必须按邮件覆盖频率（3/3 > 2/3 > 1/3）
+4. 排序必须按邮件覆盖频率（3/3 > 2/3 > 1/3），但**不要在报告中显示频率数字**
 5. 核心事实和观点必须严格分离
 6. 只生成 HTML 内容，不要 markdown 格式
 """
@@ -323,7 +323,9 @@ def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[s
 邮件内容：
 {emails_text}
 
-请严格按照格式规范生成中文 HTML 报告。"""
+请严格按照格式规范生成中文 HTML 报告。
+
+**注意：排序按邮件覆盖频率，但不要在报告中显示频率数字（如"3/3"、"2/3"）。**"""
 
     logger.info("🤖 正在调用 Kimi 大模型分析...")
 
