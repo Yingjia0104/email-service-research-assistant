@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- 📧 **邮件收取**：通过 IMAP 自动收取 Gmail 邮件
+- 📧 **邮件收取**：通过 IMAP 自动收取邮件
 - 📎 **智能解析**：自动解析邮件附件（.msg, .pdf, .docx, .txt）
 - 🤖 **AI 分析**：调用 Kimi 大模型分析卖方邮件
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
@@ -15,8 +15,8 @@
 ### 安装
 
 ```bash
-git clone https://github.com/your-repo/qclaw-mail.git
-cd qclaw-mail
+git clone https://github.com/Yingjia0104/email-service-research-assistant.git
+cd email-service-research-assistant
 pip install -r requirements.txt
 ```
 
@@ -25,7 +25,7 @@ pip install -r requirements.txt
 复制并编辑配置文件：
 
 ```bash
-cp config.yaml config.yaml.bak
+cp config.yaml.example config.yaml
 # 编辑 config.yaml，填入你的 API 密钥和邮箱配置
 ```
 
@@ -81,10 +81,10 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 ## 项目结构
 
 ```
-qclaw-mail/
+email-service/
 ├── main.py                      # FastAPI 服务入口
 ├── qclaw_mail_file.py          # 核心处理逻辑
-├── config.yaml                  # 配置文件
+├── config.yaml.example          # 配置文件模板
 ├── requirements.txt             # Python 依赖
 ├── generate_api_key.py         # API 密钥生成工具
 ├── reference_css.txt           # 报告格式 CSS
