@@ -62,6 +62,7 @@ cp config.yaml.example config.yaml
 
 > **提示**
 > - **Gmail**: 需启用 IMAP 并生成[应用专用密码](https://support.google.com/accounts/answer/185833)
+> - **Gmail**: IMAP/SMTP 配置：`imap.gmail.com` (IMAP: 993, SMTP: 587)
 > - **Outlook/Exchange**:
 >   - 个人账户：微软将于 2025-2026 年停用基本身份验证，建议迁移至 OAuth 2.0
 >   - 企业账户：需管理员在 Azure AD 中启用「允许应用密码」或配置 OAuth 2.0
