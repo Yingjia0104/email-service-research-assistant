@@ -1,5 +1,7 @@
 # AI Email Research Assistant
 
+[中文版](./README.md)
+
 An automated email research system that converts sell-side emails into professional HF Morning Brief investment reports.
 
 ## Features

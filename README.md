@@ -1,5 +1,7 @@
 # AI 邮件研究助手
 
+[English Version](./README_EN.md)
+
 自动化邮件研究系统，将卖方邮件转化为专业的 HF Morning Brief 投资报告。
 
 ## 功能特性
