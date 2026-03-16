@@ -55,9 +55,11 @@ cp config.yaml.example config.yaml
 - `target.email`: 报告发送目标邮箱
 
 > **提示**
-> - Gmail 需要使用[应用专用密码](https://support.google.com/accounts/answer/185833)
-> - 个人Outlook同理但建议采取OAuth 2.0 认证（微软已明确计划在 2025-2026 年全面禁用 Exchange Online 的「基本身份验证」（包括应用密码），强制迁移至 OAuth 2.0）
-> - 企业Outlook优先使用 OAuth 2.0 认证，需管理员在 Azure AD 中开启「允许应用密码」
+> - **Gmail**: 需启用 IMAP 并生成[应用专用密码](https://support.google.com/accounts/answer/185833)
+> - **Outlook/Exchange**:
+>   - 个人账户：微软将于 2025-2026 年停用基本身份验证，建议迁移至 OAuth 2.0
+>   - 企业账户：需管理员在 Azure AD 中启用「允许应用密码」或配置 OAuth 2.0
+>   - IMAP/SMTP 配置：`outlook.office365.com` (IMAP: 993, SMTP: 587)
 
 ### 运行
 
