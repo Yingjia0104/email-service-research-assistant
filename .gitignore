@@ -28,7 +28,7 @@ qclaw_state.json
 pending_emails.json
 AI_Morning_Brief_*.html
 reference_brief.html
-!config.yaml
+config.yaml
 .eml
 send_msg_parsed.py
 
