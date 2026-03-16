@@ -30,7 +30,7 @@ See [HF_Morning_Brief_Format_Spec.md](./HF_Morning_Brief_格式规范.md) for de
 
 ## Configurable Options
 
-- List of target investment banks
+- **Target investment banks/analysts list**: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
 - Target sectors/companies <!-- WIP -->
 - Push cutoff time (pre-US market) <!-- WIP -->
 
