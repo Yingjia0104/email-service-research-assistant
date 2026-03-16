@@ -12,6 +12,20 @@
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
 
+## 报告内容
+
+生成的报告遵循高效简炼的 HF Morning Brief 格式：
+
+| 章节 | 内容 |
+|------|------|
+| Executive Summary | 市场大背景 + 关键信号 |
+| Key Coverage | 核心事件与市场观点 |
+| Local News | 容易被忽略的信号 |
+| Peripheral Intelligence | 外围信息映射 |
+| Actionable Ideas | 可执行建议 |
+
+详见 [HF_Morning_Brief_格式规范.md](./HF_Morning_Brief_格式规范.md)
+
 ## 可配选项
 
 - 关注的投行列表
@@ -107,20 +121,6 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
-
-## 报告内容
-
-生成的报告遵循高效简炼的 HF Morning Brief 格式：
-
-| 章节 | 内容 |
-|------|------|
-| Executive Summary | 市场大背景 + 关键信号 |
-| Key Coverage | 核心事件与市场观点 |
-| Local News | 容易被忽略的信号 |
-| Peripheral Intelligence | 外围信息映射 |
-| Actionable Ideas | 可执行建议 |
-
-详见 [HF_Morning_Brief_格式规范.md](./HF_Morning_Brief_格式规范.md)
 
 ## 技术栈
 
