@@ -4,9 +4,9 @@
 
 ## 功能特性
 
-- 📧 **邮件收取**：通过 IMAP 自动收取邮件
+- 📧 **邮件收取**：通过 IMAP 自动收取重点关注的卖方邮件
 - 📎 **智能解析**：自动解析邮件附件（.msg, .pdf, .docx, .txt）
-- 🤖 **AI 分析**：调用 Kimi 大模型分析卖方邮件
+- 🤖 **AI 分析**：调用大模型分析卖方邮件，提取要点
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
 
@@ -36,7 +36,10 @@ cp config.yaml.example config.yaml
 - `imap.email` / `imap.password`: 收件邮箱和应用专用密码
 - `target.email`: 报告发送目标邮箱
 
-> **提示**：Gmail 需要使用[应用专用密码](https://support.google.com/accounts/answer/185833)
+> **提示**
+- Gmail 需要使用[应用专用密码](https://support.google.com/accounts/answer/185833)
+- 个人Outlook同理但建议采取OAuth 2.0 认证（微软已明确计划在 2025-2026 年全面禁用 Exchange Online 的「基本身份验证」（包括应用密码），强制迁移至 OAuth 2.0）
+- 企业Outlook优先使用 OAuth 2.0 认证，需管理员在 Azure AD 中开启「允许应用密码」
 
 ### 运行
 
@@ -113,7 +116,7 @@ email-service/
 - **语言**: Python 3.9+
 - **Web 框架**: FastAPI
 - **邮件**: imap-tools, smtplib
-- **AI**: Kimi (Moonshot AI)
+- **LLM**: Kimi (Moonshot AI)
 - **文档解析**: extract-msg, PyPDF2, python-docx
 
 ## 常见问题
@@ -124,7 +127,7 @@ A: 确保安装了 `extract-msg` 库
 **Q: Gmail 登录失败？**
 A: 需要开启"应用专用密码"，不要使用邮箱登录密码
 
-**Q: Kimi API 报错？**
+**Q: LLM API 报错？**
 A: 检查 API 密钥是否正确，账户是否有足够配额
 
 ## License
