@@ -47,7 +47,14 @@ EMAIL_API = "http://127.0.0.1:8877"
 KIMI_CONFIG = {
     "api_key": "",
     "base_url": "https://api.moonshot.cn/v1",
-    "model": "moonshot-v1-8k"
+    "model": "moonshot-v1-128k"
+}
+
+# 备用 API 配置（当前API余额不足时使用）
+KIMI_BACKUP_CONFIG = {
+    "api_key": "",
+    "base_url": "https://api.moonshot.ai/v1",
+    "model": "kimi-k2.5"
 }
 
 # ============ 日志系统 ============
@@ -138,7 +145,13 @@ def load_kimi_config():
 
     KIMI_CONFIG["api_key"] = kimi_cfg.get("api_key", "")
     KIMI_CONFIG["base_url"] = kimi_cfg.get("base_url", "https://api.moonshot.cn/v1")
-    KIMI_CONFIG["model"] = kimi_cfg.get("model", "moonshot-v1-8k")
+    KIMI_CONFIG["model"] = kimi_cfg.get("model", "moonshot-v1-128k")
+
+    # 加载备用 API 配置
+    backup_cfg = config.get("kimi_backup", {})
+    KIMI_BACKUP_CONFIG["api_key"] = backup_cfg.get("api_key", "")
+    KIMI_BACKUP_CONFIG["base_url"] = backup_cfg.get("base_url", "https://api.moonshot.ai/v1")
+    KIMI_BACKUP_CONFIG["model"] = backup_cfg.get("model", "kimi-k2.5")
 
     return KIMI_CONFIG
 
@@ -229,10 +242,43 @@ def save_pending_emails(emails: List[Dict]):
 
 
 # ============ AI 分析 ============
+
+def call_kimi_api(api_config: dict, system_prompt: str, user_prompt: str) -> Optional[str]:
+    """
+    调用 Kimi API，返回 HTML 内容或 None
+    """
+    url = f"{api_config['base_url']}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_config['api_key']}"
+    }
+
+    payload = {
+        "model": api_config["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 1.0,
+        "max_tokens": 64000
+    }
+
+    resp = session.post(url, json=payload, headers=headers, timeout=300)
+    result = resp.json()
+
+    if "choices" in result and len(result["choices"]) > 0:
+        return result["choices"][0]["message"]["content"]
+    else:
+        error_msg = str(result)
+        logger.warning(f"⚠️ API {api_config['base_url']} 返回错误: {error_msg}")
+        return None
+
+
 @retry_on_error(max_retries=3, delay=5.0, backoff=2.0)
 def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[str]:
     """
     调用 Kimi 大模型分析邮件，生成 HF Morning Brief HTML
+    支持主 API 失败时自动切换到备用 API
     """
     kimi_cfg = load_kimi_config()
     api_key = kimi_cfg.get("api_key", "")
@@ -327,35 +373,27 @@ def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[s
 
 **注意：排序按邮件覆盖频率，但不要在报告中显示频率数字（如"3/3"、"2/3"）。**"""
 
-    logger.info("🤖 正在调用 Kimi 大模型分析...")
+    # 尝试主 API
+    logger.info(f"🤖 正在调用 Kimi 大模型分析... (主API: {kimi_cfg['base_url']})")
+    html_content = call_kimi_api(kimi_cfg, system_prompt, user_prompt)
 
-    url = f"{kimi_cfg['base_url']}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
+    # 如果主 API 失败，尝试备用 API
+    if not html_content:
+        backup_cfg = KIMI_BACKUP_CONFIG
+        if backup_cfg.get("api_key"):
+            logger.warning(f"⚠️ 主 API 失败，尝试备用 API: {backup_cfg['base_url']} (模型: {backup_cfg['model']})")
+            html_content = call_kimi_api(backup_cfg, system_prompt, user_prompt)
+            if html_content:
+                logger.info("✅ 备用 API 分析完成")
+        else:
+            logger.error("❌ 主 API 失败，且未配置备用 API")
+            raise Exception("Kimi API error: 主 API 和备用 API 均失败")
 
-    payload = {
-        "model": kimi_cfg["model"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 1.0,
-        "max_tokens": 64000
-    }
-
-    resp = session.post(url, json=payload, headers=headers, timeout=300)
-    result = resp.json()
-
-    if "choices" in result and len(result["choices"]) > 0:
-        html_content = result["choices"][0]["message"]["content"]
+    if html_content:
         logger.info("✅ Kimi 分析完成")
         return html_content
     else:
-        error_msg = str(result)
-        logger.error(f"❌ Kimi API 返回错误: {error_msg}")
-        raise Exception(f"Kimi API error: {error_msg}")
+        raise Exception("Kimi API error: 未能获取有效响应")
 
 
 # ============ 报告处理 ============

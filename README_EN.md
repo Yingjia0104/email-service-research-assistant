@@ -6,7 +6,7 @@ An automated email research system that converts sell-side emails into professio
 
 ## Features
 
-Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Report Generation → Auto Push
+Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Report Generation → Everyday Push
 
 - 📧 **Email Receiving**: IMAP-based filtering of targeted sell-side emails
 - 📎 **Smart Parsing**: Auto-parse email body and attachments (.msg, .pdf, .docx, .txt)
@@ -16,7 +16,7 @@ Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Rep
 
 ## Report Content
 
-Generated reports follow the efficient HF Morning Brief format:
+Generated reports follow an efficient format:
 
 | Section | Content |
 |---------|---------|
@@ -30,7 +30,7 @@ See [HF_Morning_Brief_Format_Spec.md](./HF_Morning_Brief_格式规范.md) for de
 
 ## Configurable Options
 
-- **Target investment banks/analysts list**: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
+- Target investment banks/analysts list: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
 - Target sectors/companies <!-- WIP -->
 - Push cutoff time (pre-US market) <!-- WIP -->
 
@@ -128,8 +128,15 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **Language**: Python 3.9+
 - **Web Framework**: FastAPI
 - **Email**: imap-tools, smtplib
-- **LLM**: Kimi (Moonshot AI)
+- **LLM**: Kimi/MiniMax/GPT/MiMo/Sonnet
 - **Document Parsing**: extract-msg, PyPDF2, python-docx
+
+### Recommended LLM
+
+Use Kimi series models (e.g., `kimi-k2.5` or `moonshot-v1-128k`):
+
+- **Long Context**: Supports 128K-256K tokens, no truncation needed for multiple emails + full attachments
+- **Multimodal Understanding**: Supports image understanding, can analyze charts and screenshots directly
 
 ## Security Notes
 

@@ -32,6 +32,10 @@ api_key: "your-secret-key"
 kimi:
   api_key: "your-kimi-api-key"
   base_url: "https://api.moonshot.cn/v1"
+  model: "moonshot-v1-128k"
+kimi_backup:
+  api_key: "your-backup-api-key"
+  base_url: "https://api.moonshot.ai/v1"
   model: "kimi-k2.5"
 smtp:
   host: "smtp.gmail.com"

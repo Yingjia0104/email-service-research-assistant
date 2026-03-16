@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-邮件接收 → 智能解析 → AI 解析 → 观点抽取 → 报告生成 → 自动推送
+邮件接收 → 智能解析 → AI 解析 → 观点抽取 → 报告生成 → 每日推送
 
 - 📧 **邮件收取**：通过 IMAP 自动过滤出重点关注的卖方邮件
 - 📎 **智能解析**：自动解析邮件正文和附件（.msg, .pdf, .docx, .txt）
@@ -16,7 +16,7 @@
 
 ## 报告内容
 
-生成的报告遵循高效简炼的 HF Morning Brief 格式：
+生成的报告遵循高效简炼的格式：
 
 | 章节 | 内容 |
 |------|------|
@@ -30,7 +30,7 @@
 
 ## 可配选项
 
-- **关注的投行/分析师列表**：支持后缀匹配（`@morganstanley.com`）或精确匹配（`analyst@gs.com`）
+- 关注的投行/分析师列表：支持后缀匹配（`@morganstanley.com`）或精确匹配（`analyst@gs.com`）
 - 关注的板块/公司 <!-- 迭代中 -->
 - 推送截止时间（美股盘前） <!-- 迭代中 -->
 
@@ -77,8 +77,9 @@ cp config.yaml.example config.yaml
 - `target.email`: 报告发送目标邮箱
 
 > **提示**
-> - **Gmail**: 需启用 IMAP 并生成[应用专用密码](https://support.google.com/accounts/answer/185833)
-> - **Gmail**: IMAP/SMTP 配置：`imap.gmail.com` (IMAP: 993, SMTP: 587)
+> - **Gmail**: 
+>   - 需启用 IMAP 并生成[应用专用密码](https://support.google.com/accounts/answer/185833)
+>   - IMAP/SMTP 配置：`imap.gmail.com` (IMAP: 993, SMTP: 587)
 > - **Outlook/Exchange**:
 >   - 个人账户：微软将于 2025-2026 年停用基本身份验证，建议迁移至 OAuth 2.0
 >   - 企业账户：需管理员在 Azure AD 中启用「允许应用密码」或配置 OAuth 2.0
@@ -129,8 +130,15 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **语言**: Python 3.9+
 - **Web 框架**: FastAPI
 - **邮件**: imap-tools, smtplib
-- **LLM**: Kimi (Moonshot AI)
+- **大语言模型**: Kimi/MiniMax/GPT/MiMo/Sonnet
 - **文档解析**: extract-msg, PyPDF2, python-docx
+
+### 推荐LLM
+
+推荐使用 Kimi 系列模型（如 `kimi-k2.5` 或 `moonshot-v1-128k`）：
+
+- **超长上下文**：支持 128K-256K tokens，无需截断即可处理多封邮件 + 完整附件内容
+- **多模态理解**：支持图片理解，可直接分析邮件中的图表、截图等视觉内容
 
 ## 安全注意事项
 
@@ -159,7 +167,7 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 **Q: 解析 .msg 附件失败？**
 A: 确保安装了 `extract-msg` 库
 
-**Q: Gmail 登录失败？**
+**Q: 邮箱登录失败？**
 A: 需要开启"应用专用密码"，不要使用邮箱登录密码
 
 **Q: LLM API 报错？**
