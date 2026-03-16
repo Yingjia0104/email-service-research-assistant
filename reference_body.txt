@@ -1,0 +1,348 @@
+
+    <div class="container">
+        <h1>AI Morning Brief | 2026-03-14</h1>
+        <div class="meta">
+            Prepared by: Research Assistant | Source: MS Tech Takes 3.12 + UBS US/Europe into APAC | Reading time: 3 mins
+        </div>
+
+        <h2>Executive Summary</h2>
+        <p><strong>市场大背景:</strong> 伊朗战争升级 + 私募信贷赎回危机 + 能源通胀三重冲击，市场进入<strong>系统性减仓(de-grossing)</strong>模式</p>
+        
+        <p><strong>关键信号:</strong></p>
+        <ul>
+            <li>10Y UST 4.23%(+7bps) | 降息预期 53bp→17bp</li>
+            <li>布油破$100（2022年8月以来首次）</li>
+            <li>AI板块剧烈分化：Anthropic企业采用加速但被五角大楼封杀；META推4款自研芯片；NVIDIA宣布$260亿开源模型投资</li>
+        </ul>
+
+        <div class="divider"></div>
+
+        <h2>核心事件与市场观点</h2>
+
+        <h3>1. Anthropic：企业"新默认" vs 政府"黑名单"</h3>
+        <p><strong>核心事实</strong></p>
+        <ul>
+            <li>企业端：Ramp数据2月采用率24%(+5% m/m)，首次AI采购赢率70% vs OpenAI</li>
+            <li>政府端：五角大楼认定为"供应链风险"，CTO称"无谈判可能"，永久排除国防部采购</li>
+            <li>战略转向：与Blackstone等PE洽谈AI咨询JV</li>
+        </ul>
+
+        <p><strong>市场怎么看</strong></p>
+        <table>
+            <tr>
+                <th>观点来源</th>
+                <th>立场</th>
+                <th>核心论点</th>
+            </tr>
+            <tr>
+                <td><strong>Brad Gerstner</strong></td>
+                <td>强烈看多</td>
+                <td><span class="highlight">"Anthropic is the new default"</span>，企业客户标准选择正在切换</td>
+            </tr>
+            <tr>
+                <td><strong>行业观察</strong></td>
+                <td>理性看待</td>
+                <td>企业关注产品力而非政府争议；同日Claude Excel/PPT协同演示被视为<span class="highlight">危机公关/注意力转移</span></td>
+            </tr>
+            <tr>
+                <td><strong>媒体叙事</strong></td>
+                <td>风险警示</td>
+                <td>彭博标题用"War"而非"dispute"，<span class="highlight">生死存亡级冲突</span>；估值天花板受限；Altman同日访谈强化OpenAI"合规"形象</td>
+            </tr>
+        </table>
+
+        <p><strong>投资启示:</strong> 被迫接受"专注B端、放弃G端"，<span class="highlight">短期估值或因PE入场下调</span>，但长期企业粘性增强</p>
+
+        <h3>2. META & AVGO：定制芯片"双轨战略"</h3>
+        <p><strong>核心事实</strong></p>
+        <ul>
+            <li>META：2026-27年密集发布4款自研芯片(MTIA 300-500)，每6个月一款，台积电N3工艺</li>
+            <li>AVGO：所有4款芯片独家合作伙伴；MTIA 400支持72芯片scale-up</li>
+            <li>技术细节：公开72芯片架构图（通常保密），强调AALC冷却兼容传统数据中心</li>
+        </ul>
+
+        <p><strong>市场怎么看</strong></p>
+        <table>
+            <tr>
+                <th>观点来源</th>
+                <th>立场</th>
+                <th>核心论点</th>
+            </tr>
+            <tr>
+                <td><strong>Morgan Stanley</strong></td>
+                <td>谨慎乐观</td>
+                <td>2年4款节奏符合AVGO描述的"客户从单一大芯片转向多款专用芯片"趋势</td>
+            </tr>
+            <tr>
+                <td><strong>AVGO管理层</strong></td>
+                <td>强烈看多</td>
+                <td>XPU业务今年95%、明年90%收入来自TPU定制芯片；<span class="highlight">多客户战略被市场低估</span></td>
+            </tr>
+            <tr>
+                <td><strong>META信号</strong></td>
+                <td>秀肌肉</td>
+                <td>向NVIDIA/AMD传递"有自研实力，不是普通客户"；<span class="highlight">降低长期AI基础设施成本</span></td>
+            </tr>
+        </table>
+
+        <p><strong>投资启示:</strong> <span class="highlight">AVGO为最大间接受益者</span>，XPU业务高毛利、高粘性；META专注推理"每瓦特最高效token"</p>
+
+        <h3>3. 中国AI芯片：阿里"全栈模式"</h3>
+        <p><strong>核心事实</strong></p>
+        <ul>
+            <li>市场规模：$670亿 by 2030(vs $190亿 2024)，自给率76%</li>
+            <li>竞争格局：华为~65%垄断，寒武纪~11%，阿里平头哥高个位数</li>
+            <li>技术路线：不追求峰值性能，通过系统设计提升"每瓦特每美元性能"，推理场景接近A100</li>
+        </ul>
+
+        <p><strong>市场怎么看</strong></p>
+        <table>
+            <tr>
+                <th>观点来源</th>
+                <th>立场</th>
+                <th>核心论点</th>
+            </tr>
+            <tr>
+                <td><strong>MS Asia</strong></td>
+                <td>结构性看多</td>
+                <td>阿里取代腾讯成Top Pick，<span class="highlight">唯一"芯片+模型+云+应用"四层垂直整合玩家</span>，类Google模式</td>
+            </tr>
+            <tr>
+                <td><strong>估值分析</strong></td>
+                <td>隐藏价值</td>
+                <td>BABA SOTP $240-345，<span class="highlight">当前未反映T-Head芯片、Qwen模型期权价值</span>；寒武纪60x P/S溢价</td>
+            </tr>
+            <tr>
+                <td><strong>地缘政治</strong></td>
+                <td>长期脱钩</td>
+                <td>供应链重构需10年而非2年；<span class="highlight">TCO维度优于峰值性能</span></td>
+            </tr>
+        </table>
+
+        <p><strong>投资启示:</strong> 关注TCO维度而非单纯性能；阿里<span class="highlight">全栈能力最具全球竞争力</span></p>
+
+        <h3>4. NVIDIA：从卖铲子到挖金子</h3>
+        <p><strong>核心事实</strong></p>
+        <ul>
+            <li>战略转向：5年$260亿投资开源模型(NemoClaw)，金额是Meta Llama 10倍+</li>
+            <li>Jensen定位："single most important release of software, probably ever"</li>
+            <li>市场反应：边缘推理股票大涨(DOCN +10%, FSLY +5.8%, INTC +2.6%)</li>
+        </ul>
+
+        <p><strong>市场怎么看</strong></p>
+        <table>
+            <tr>
+                <th>观点来源</th>
+                <th>立场</th>
+                <th>核心论点</th>
+            </tr>
+            <tr>
+                <td><strong>Jack Dorsey</strong></td>
+                <td>背书支持</td>
+                <td>"this would be excellent"，科技精英圈层认同</td>
+            </tr>
+            <tr>
+                <td><strong>Morgan Stanley</strong></td>
+                <td>战略警觉</td>
+                <td>从"卖铲子(GPU)"到"挖金子(模型)"，<span class="highlight">硬件护城河变薄</span>；冲击OpenAI/Anthropic收费模式</td>
+            </tr>
+            <tr>
+                <td><strong>竞争格局</strong></td>
+                <td>红海预警</td>
+                <td>Agentic AI基础设施成下一战场；<span class="highlight">既是进攻也是防守</span></td>
+            </tr>
+        </table>
+
+        <p><strong>投资启示:</strong> 短期利好边缘推理，<span class="highlight">长期削弱纯模型公司定价权</span></p>
+
+        <h3>5. 宏观与市场情绪</h3>
+        <p><strong>核心事实</strong></p>
+        <ul>
+            <li>伊朗战争：誓言持续关闭霍尔木兹海峡，IEA称史上最大石油供应中断</li>
+            <li>流动性危机：MS限制North Haven基金赎回(Q1赎回请求10.9%超5%限额)</li>
+        </ul>
+
+        <p><strong>市场怎么看</strong></p>
+        <table>
+            <tr>
+                <th>观点来源</th>
+                <th>立场</th>
+                <th>核心论点</th>
+            </tr>
+            <tr>
+                <td><strong>UBS Trading</strong></td>
+                <td>谨慎观望</td>
+                <td>"波动、低信念交易日，de-grossing迹象明显"</td>
+            </tr>
+            <tr>
+                <td><strong>Sector Rotation</strong></td>
+                <td>防御优先</td>
+                <td>公用事业、无线通信、能源唯一收绿；Quality Software跑赢半导体+240bps</td>
+            </tr>
+            <tr>
+                <td><strong>流动性</strong></td>
+                <td>警惕信号</td>
+                <td>成交集中于ETF而非个股，<span class="highlight">私募信贷危机严重拖累金融板块</span></td>
+            </tr>
+        </table>
+
+        <h3>6. 软件行业：AI颠覆下的自救</h3>
+        <p><strong>核心事实</strong></p>
+        <ul>
+            <li>裁员：TEAM 10%，WDAY CEO离职+再裁2%；市场反馈"力度不够，需40%裁员"</li>
+            <li>管理层信号：NOW CEO+CFO增持，$50亿回购；TTD CEO买入$1.5亿股</li>
+            <li>效率差距：大型软件公司员工增长7%，Mag 7基本持平但收入增长更快</li>
+        </ul>
+
+        <p><strong>市场怎么看</strong></p>
+        <table>
+            <tr>
+                <th>观点来源</th>
+                <th>立场</th>
+                <th>核心论点</th>
+            </tr>
+            <tr>
+                <td><strong>Morgan Stanley</strong></td>
+                <td>趋势判断</td>
+                <td>软件公司通过(1)裁员(2)回购(3)管理层变更应对AI估值下调</td>
+            </tr>
+            <tr>
+                <td><strong>效率对比</strong></td>
+                <td>结构性劣势</td>
+                <td><span class="highlight">效率差距扩大是结构性问题</span>；软件板块vs Mag 7的spread可能继续扩大</td>
+            </tr>
+        </table>
+
+        <div class="divider"></div>
+
+        <h2>Local News | 容易被忽略的信号</h2>
+
+        <h3>1. 软件行业的"沉默裁员"</h3>
+        <p><strong>信号:</strong> TEAM 10%裁员，市场反馈"力度不够，需要40%"</p>
+        <p><strong>为什么重要:</strong> 图表数据显示大型软件公司员工增长7%(2023-25E)，而Mag 7基本持平但收入增长更快，<span class="highlight">效率差距扩大是结构性问题</span></p>
+        <p><strong>Action:</strong> 软件板块 vs Mag 7的spread可能继续扩大</p>
+
+        <h3>2. NVIDIA开源模型的"时间选择"</h3>
+        <p><strong>信号:</strong> $260亿开源投资宣布与Anthropic五角大楼争议同日</p>
+        <p><strong>为什么重要:</strong> Jensen趁机强化"开源/可信"形象，<span class="highlight">直接冲击OpenAI/Anthropic收费模式</span></p>
+        <p><strong>Action:</strong> 关注NVDA开源模型对边缘推理生态的短期催化，以及长期对纯模型公司定价权的侵蚀</p>
+
+        <h3>3. 私募信贷赎回的"连锁反应"</h3>
+        <p><strong>信号:</strong> MS限制赎回同日，Cliffwater限赎7%，德意志银行披露$300亿私募信贷敞口</p>
+        <p><strong>为什么重要:</strong> 这不是单一事件，是<span class="highlight">系统性流动性收缩</span>；JPMorgan已减少该领域放贷</p>
+        <p><strong>Action:</strong> 金融板块(MS, BX, GS)短期承压，但de-grossing可能创造错杀机会</p>
+
+        <h3>4. 中国AI芯片的"估值分层"</h3>
+        <p><strong>信号:</strong> 寒武纪60x 2026 P/S vs 阿里平头哥/昆仑芯~20x</p>
+        <p><strong>为什么重要:</strong> 市场对"纯AI芯片"vs"大集团内部芯片部门"的<span class="highlight">估值逻辑差异巨大</span></p>
+        <p><strong>Action:</strong> BABA作为<span class="highlight">唯一"全栈AI玩家"</span>，隐藏价值或被市场忽略</p>
+
+        <div class="divider"></div>
+
+        <h2>Peripheral Intelligence | 外围信息/类比映射</h2>
+
+        <h3>非核心公司事件 → 核心洞察</h3>
+        <table>
+            <tr>
+                <th>外围事件</th>
+                <th>相关公司</th>
+                <th>对Key Coverage的映射</th>
+            </tr>
+            <tr>
+                <td><strong>NVIDIA投资Neibus $20亿</strong></td>
+                <td>NBIS (+16%)</td>
+                <td>自dealing担忧再起；验证AI infra投资加速，但<span class="highlight">质疑NVDA优先考虑关联公司</span></td>
+            </tr>
+            <tr>
+                <td><strong>Wells Fargo升级OXY</strong></td>
+                <td>OXY (+5.1%)</td>
+                <td>能源板块叙事从"衰退担忧"转向<span class="highlight">"地缘政治溢价"</span></td>
+            </tr>
+            <tr>
+                <td><strong>TTD CEO买入$1.5亿股</strong></td>
+                <td>TTD</td>
+                <td>管理层强烈看多信号；<span class="highlight">软件板块内部出现分化</span></td>
+            </tr>
+            <tr>
+                <td><strong>Pokemon TGC Pocket 1亿下载</strong></td>
+                <td>Nintendo</td>
+                <td>IP价值在AI时代依然韧性；<span class="highlight">对比AI公司"烧钱换增长"</span></td>
+            </tr>
+            <tr>
+                <td><strong>Apple折叠iPhone</strong></td>
+                <td>AAPL</td>
+                <td>折叠屏供应链或迎新行情；同日发布可能<span class="highlight">对冲AI负面新闻</span></td>
+            </tr>
+        </table>
+
+        <h3>跨市场信号</h3>
+        <p><strong>中国AI芯片 ↔ META自研芯片</strong></p>
+        <ul>
+            <li>两者都选择"推理优先"而非"训练峰值性能"</li>
+            <li><strong>Insight:</strong> 全球AI芯片市场分化为<span class="highlight">"训练(NVDA垄断)"和"推理(分散化/定制化)"两大阵营</span></li>
+        </ul>
+
+        <p><strong>伊朗战争能源冲击 ↔ 2022年俄乌冲突</strong></p>
+        <ul>
+            <li>化肥股(CF +13.2%, DOW +9.3%)因运输中断上涨，与2022年剧本类似</li>
+            <li><strong>Insight:</strong> <span class="highlight">供应链中断受益者</span>(能源/化肥/化工)可能持续跑赢，直到战争结束信号</li>
+        </ul>
+
+        <div class="divider"></div>
+
+        <h2>Actionable Ideas</h2>
+
+        <h3>短期(1-5天)</h3>
+        <ul>
+            <li><strong>做多:</strong> 能源(OXY, CF Industries), 防御性公用事业</li>
+            <li><strong>做空/减持:</strong> 拥挤多头(AI赢家, Semis), 私募信贷暴露金融股(MS, BX)</li>
+            <li><strong>事件驱动:</strong> 关注Anthropic PE JV进展，若<span class="highlight">估值折扣创造entry point</span></li>
+        </ul>
+
+        <h3>中期(1-4周)</h3>
+        <ul>
+            <li><strong>Pairs Trade:</strong> 做多AVGO vs 做空MRVL (XPU业务确定性更强)</li>
+            <li><strong>主题:</strong> BABA中国全栈AI玩家<span class="highlight">估值重估</span>；关注T-Head芯片价值discovery</li>
+            <li><strong>风险对冲:</strong> 持有能源/黄金对冲地缘政治尾部风险</li>
+        </ul>
+
+        <h3>Catalysts to Watch</h3>
+        <table>
+            <tr>
+                <th>Catalyst</th>
+                <th>时间</th>
+                <th>影响标的</th>
+            </tr>
+            <tr>
+                <td>Adobe earnings</td>
+                <td>Mar 13</td>
+                <td>ADBE, 软件板块</td>
+            </tr>
+            <tr>
+                <td>Fed Meeting</td>
+                <td>Mar 19</td>
+                <td>全球市场, 降息预期</td>
+            </tr>
+            <tr>
+                <td>Micron earnings</td>
+                <td>Mar 19</td>
+                <td>MU, 存储/HBM供应链</td>
+            </tr>
+            <tr>
+                <td>Iran战争进展</td>
+                <td>TBD</td>
+                <td>能源, 全球风险资产</td>
+            </tr>
+            <tr>
+                <td>Anthropic PE JV closure</td>
+                <td>TBD</td>
+                <td>AI板块估值锚定</td>
+            </tr>
+        </table>
+
+        <div class="divider"></div>
+
+        <p><strong>Bottom Line:</strong> 市场处于"宏观三重冲击+AI板块分化"的复杂环境，短期<span class="highlight">防御优先</span>，中期关注<span class="highlight">错杀机会</span>(Anthropic估值折扣、BABA隐藏价值、AVGO XPU业务)</p>
+
+        <p><strong>Next Update:</strong> 盘前30 mins或重大事件发生时</p>
+    </div>

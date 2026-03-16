@@ -1,0 +1,47 @@
+# QQ邮箱发送 + Gmail收取配置
+
+# API密钥 (调用接口需要)
+api_key: "q7CROi5BWbvV5txSg6g0QN2zlAdd9SJj"
+
+# Kimi (Moonshot AI) 大模型配置
+kimi:
+  api_key: "sk-BF4hRWRBeGsQsUSv2o08bltFu7W91Uv2sjIYfaEiyGduZNEq"
+  base_url: "https://api.moonshot.cn/v1"
+  model: "kimi-k2.5"
+
+# 发送方 (Gmail SMTP)
+smtp:
+  host: "smtp.gmail.com"
+  port: 587
+  email: "yingjiachen99@gmail.com"
+  password: "mfpy ybxu feqi vusk"
+
+# 收取方 (Gmail IMAP)
+imap:
+  host: "imap.gmail.com"
+  port: 993
+  email: "yingjiachen99@gmail.com"
+  password: "mfpy ybxu feqi vusk"
+
+# 目标邮箱 (处理后发送到哪里)
+target:
+  email: "yingjiachen99@gmail.com"
+
+# 邮件过滤配置
+filters:
+  # 只接收这些后缀的邮件，为空则不限制
+  allowed_senders:
+    - "@morganstanley.com"
+    - "@jpmorgan.com"
+    - "@bofa.com"
+    - "@goldmansachs.com"
+    - "@citigroup.com"
+    - "@ubs.com"
+    - "@credit-suisse.com"
+    - "@deutscheBank.com"
+    - "@barclays.com"
+    - "1049593610@qq.com"  # 自己的QQ邮箱
+
+server:
+  host: "0.0.0.0"
+  port: 8877

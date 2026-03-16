@@ -1,0 +1,132 @@
+# QClaw Mail - AI 邮件研究助手
+
+自动化邮件研究系统，将卖方邮件转化为专业的 HF Morning Brief 投资报告。
+
+## 功能特性
+
+- 📧 **邮件收取**：通过 IMAP 自动收取 Gmail 邮件
+- 📎 **智能解析**：自动解析邮件附件（.msg, .pdf, .docx, .txt）
+- 🤖 **AI 分析**：调用 Kimi 大模型分析卖方邮件
+- 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
+- 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
+
+## 快速开始
+
+### 安装
+
+```bash
+git clone https://github.com/your-repo/qclaw-mail.git
+cd qclaw-mail
+pip install -r requirements.txt
+```
+
+### 配置
+
+复制并编辑配置文件：
+
+```bash
+cp config.yaml config.yaml.bak
+# 编辑 config.yaml，填入你的 API 密钥和邮箱配置
+```
+
+**config.yaml 必填项：**
+- `api_key`: API 访问密钥
+- `kimi.api_key`: Kimi API 密钥
+- `smtp.email` / `smtp.password`: 发件邮箱和应用专用密码
+- `imap.email` / `imap.password`: 收件邮箱和应用专用密码
+- `target.email`: 报告发送目标邮箱
+
+> **提示**：Gmail 需要使用[应用专用密码](https://support.google.com/accounts/answer/185833)
+
+### 运行
+
+```bash
+# 1. 启动 API 服务（后台运行）
+python main.py
+
+# 2. 运行处理流程
+python qclaw_mail_file.py
+```
+
+## 使用方式
+
+### 命令行选项
+
+```bash
+# 完整流程
+python qclaw_mail_file.py
+
+# 仅分析（不发送）
+python qclaw_mail_file.py --analyze
+
+# 强制运行（跳过每日一次限制）
+python qclaw_mail_file.py --force
+
+# 检查状态
+python qclaw_mail_file.py --check
+```
+
+### API 调用
+
+```bash
+# 收取邮件
+curl "http://localhost:8877/api/emails?api_key=YOUR_KEY&limit=10"
+
+# 发送邮件
+curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
+```
+
+## 项目结构
+
+```
+qclaw-mail/
+├── main.py                      # FastAPI 服务入口
+├── qclaw_mail_file.py          # 核心处理逻辑
+├── config.yaml                  # 配置文件
+├── requirements.txt             # Python 依赖
+├── generate_api_key.py         # API 密钥生成工具
+├── reference_css.txt           # 报告格式 CSS
+├── reference_body.txt          # 报告结构参考
+├── HF_Morning_Brief_格式规范.md # 格式规范文档
+├── CLAUDE.md                   # AI 助手指南
+└── .gitignore                  # Git 忽略配置
+```
+
+## 报告格式
+
+生成的报告遵循专业 HF Morning Brief 格式：
+
+| 章节 | 内容 |
+|------|------|
+| Executive Summary | 市场大背景 + 关键信号 |
+| Key Coverage | 核心事件与市场观点 |
+| Local News | 容易被忽略的信号 |
+| Peripheral Intelligence | 外围信息映射 |
+| Actionable Ideas | 可执行建议 |
+
+详见 [HF_Morning_Brief_格式规范.md](./HF_Morning_Brief_格式规范.md)
+
+## 技术栈
+
+- **语言**: Python 3.9+
+- **Web 框架**: FastAPI
+- **邮件**: imap-tools, smtplib
+- **AI**: Kimi (Moonshot AI)
+- **文档解析**: extract-msg, PyPDF2, python-docx
+
+## 常见问题
+
+**Q: 解析 .msg 附件失败？**
+A: 确保安装了 `extract-msg` 库
+
+**Q: Gmail 登录失败？**
+A: 需要开启"应用专用密码"，不要使用邮箱登录密码
+
+**Q: Kimi API 报错？**
+A: 检查 API 密钥是否正确，账户是否有足够配额
+
+## License
+
+MIT License
