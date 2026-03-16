@@ -12,25 +12,21 @@
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
 
-## 报告内容
+## 项目结构
 
-生成的报告遵循高效简炼的 HF Morning Brief 格式：
-
-| 章节 | 内容 |
-|------|------|
-| Executive Summary | 市场大背景 + 关键信号 |
-| Key Coverage | 核心事件与市场观点 |
-| Local News | 容易被忽略的信号 |
-| Peripheral Intelligence | 外围信息映射 |
-| Actionable Ideas | 可执行建议 |
-
-详见 [HF_Morning_Brief_格式规范.md](./HF_Morning_Brief_格式规范.md)
-
-## 可配选项
-
- - 关注的投行列表
- - 关注的板块/公司 <!-- 迭代中 -->
- - 推送截止时间（美股盘前） <!-- 迭代中 -->
+```
+email-service/
+├── main.py                      # FastAPI 服务入口
+├── qclaw_mail_file.py          # 核心处理逻辑
+├── config.yaml.example          # 配置文件模板
+├── requirements.txt             # Python 依赖
+├── generate_api_key.py         # API 密钥生成工具
+├── reference_css.txt           # 报告格式 CSS
+├── reference_body.txt          # 报告结构参考
+├── HF_Morning_Brief_格式规范.md # 格式规范文档
+├── CLAUDE.md                   # AI 助手指南
+└── .gitignore                  # Git 忽略配置
+```
 
 ## 快速开始
 
@@ -59,9 +55,9 @@ cp config.yaml.example config.yaml
 - `target.email`: 报告发送目标邮箱
 
 > **提示**
-- Gmail 需要使用[应用专用密码](https://support.google.com/accounts/answer/185833)
-- 个人Outlook同理但建议采取OAuth 2.0 认证（微软已明确计划在 2025-2026 年全面禁用 Exchange Online 的「基本身份验证」（包括应用密码），强制迁移至 OAuth 2.0）
-- 企业Outlook优先使用 OAuth 2.0 认证，需管理员在 Azure AD 中开启「允许应用密码」
+> - Gmail 需要使用[应用专用密码](https://support.google.com/accounts/answer/185833)
+> - 个人Outlook同理但建议采取OAuth 2.0 认证（微软已明确计划在 2025-2026 年全面禁用 Exchange Online 的「基本身份验证」（包括应用密码），强制迁移至 OAuth 2.0）
+> - 企业Outlook优先使用 OAuth 2.0 认证，需管理员在 Azure AD 中开启「允许应用密码」
 
 ### 运行
 
@@ -103,25 +99,9 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
 
-## 项目结构
+## 报告内容
 
-```
-email-service/
-├── main.py                      # FastAPI 服务入口
-├── qclaw_mail_file.py          # 核心处理逻辑
-├── config.yaml.example          # 配置文件模板
-├── requirements.txt             # Python 依赖
-├── generate_api_key.py         # API 密钥生成工具
-├── reference_css.txt           # 报告格式 CSS
-├── reference_body.txt          # 报告结构参考
-├── HF_Morning_Brief_格式规范.md # 格式规范文档
-├── CLAUDE.md                   # AI 助手指南
-└── .gitignore                  # Git 忽略配置
-```
-
-## 报告格式
-
-生成的报告遵循专业 HF Morning Brief 格式：
+生成的报告遵循高效简炼的 HF Morning Brief 格式：
 
 | 章节 | 内容 |
 |------|------|
@@ -132,6 +112,12 @@ email-service/
 | Actionable Ideas | 可执行建议 |
 
 详见 [HF_Morning_Brief_格式规范.md](./HF_Morning_Brief_格式规范.md)
+
+## 可配选项
+
+- 关注的投行列表
+- 关注的板块/公司 <!-- 迭代中 -->
+- 推送截止时间（美股盘前） <!-- 迭代中 -->
 
 ## 技术栈
 
