@@ -1,22 +1,21 @@
-# AI 邮件研究助手
+# AI邮件投研助手
 
 [English Version](./README_EN.md)
 
-自动化邮件研究系统，将卖方邮件转化为专业的 HF Morning Brief 投资报告。
+自动化邮件分析和推送助手，将卖方邮件转化为专业的 HF Morning Brief 投资报告。
 
 ## 功能特性
 
-邮件接收 → 智能解析 → AI 解析 → 观点抽取 → 报告生成 → 每日推送
+邮件接收 → 智能解析 → AI分析 → 观点抽取 → 报告生成 → 交易日推送
 
 - 📧 **邮件收取**：通过 IMAP 自动过滤出重点关注的卖方邮件
-- 📎 **智能解析**：自动解析邮件正文和附件（.msg, .pdf, .docx, .txt）
-- 🤖 **AI 分析**：调用大模型分析卖方邮件，提取要点
+- 📎 **智能解析**：自动解析邮件正文和附件，支持.msg, .pdf, .docx, .txt格式的附件
+- 🤖 **AI分析**：调用大模型分析卖方邮件，提取要点
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
 - 🗃️ **SQLite 状态管理**：以本地数据库作为去重、待处理、已发送记录的唯一事实来源
 - 🧹 **上下文优化**：自动裁掉邮件尾部署名/免责声明，压缩图片元数据，控制上下文长度
 - 🔀 **容错分析链路**：主模型短重试后自动切备用模型；超长输入会拆批分析后再合并
-- 🧱 **HTML 规范化**：统一本地日期标题、补全不完整 HTML、稳定小节层级与提示框样式
 
 ## 报告内容
 
@@ -36,7 +35,7 @@
 
 - 关注的投行/分析师列表：支持后缀匹配（`@morganstanley.com`）或精确匹配（`analyst@gs.com`）
 - `kimi_backup`：可配置备用模型；注意需要真实可用的独立凭证，不能假设与主模型 endpoint/key 完全兼容
-- 关注的板块/公司（迭代中）
+- 关注的板块/公司：迭代中，敬请期待
 
 ## 项目结构
 
@@ -75,18 +74,25 @@ cp config.yaml.example config.yaml
 # 编辑 config.yaml，填入你的 API 密钥和邮箱配置
 ```
 
-**config.yaml 必填项：**
+**最小配置（仅收信 + 分析，不自动发回报告）：**
 - `api_key`: API 访问密钥
 - `kimi.api_key`: Kimi API 密钥
 - `kimi_backup.api_key`: 备用模型密钥（可选但强烈建议）
+- `imap.email` / `imap.password`: 收件邮箱和应用专用密码
+
+**完整闭环（收信 + 分析 + 自动发送报告）时额外配置：**
 - `smtp.email` / `smtp.password`: 发件邮箱和应用专用密码
 - `smtp.timeout_seconds`: SMTP 超时秒数（建议保留默认值 30）
-- `imap.email` / `imap.password`: 收件邮箱和应用专用密码
 - `target.email`: 报告发送目标邮箱
+
+> 多数实际场景下，只需要同一个邮箱同时具备 IMAP 和 SMTP 能力即可：
+> - 它既作为系统监控的收件箱
+> - 也作为系统发送最终报告的邮箱
+> - `target.email` 也可以直接填这个同一个邮箱地址
 
 > **提示**
 > - **Gmail**: 
->   - 需启用 IMAP 并生成[应用专用密码](https://support.google.com/accounts/answer/185833)
+>   - 若只做收信分析，启用 IMAP 即可；若要完整闭环，则同一个邮箱还需具备 SMTP 发信能力并配置[应用专用密码](https://support.google.com/accounts/answer/185833)
 >   - IMAP/SMTP 配置：`imap.gmail.com` (IMAP: 993, SMTP: 587)
 > - **Outlook/Exchange**:
 >   - 个人账户：微软将于 2025-2026 年停用基本身份验证，建议迁移至 OAuth 2.0
@@ -94,7 +100,7 @@ cp config.yaml.example config.yaml
 >   - IMAP/SMTP 配置：`outlook.office365.com` (IMAP: 993, SMTP: 587)
 > - **QQ 邮箱**:
 >   - 建议 SMTP 使用 `465 + SSL`
->   - IMAP/SMTP 都应使用授权码，不要直接用登录密码
+>   - 收件和发信都应使用授权码，不要直接用登录密码
 >   - IMAP/SMTP 配置：`imap.qq.com` (993), `smtp.qq.com` (465 / SSL)
 
 ### 运行
@@ -137,21 +143,6 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
 
-### 2026-03-16 关键迭代
-
-- 服务端鉴权与白名单配置已改为按请求读取最新配置，便于联调时热更新 `allowed_senders`
-- 邮件收取、待处理状态、已发送记录统一落 SQLite，避免“分析对象”和“标记对象”错位
-- 大模型分析前会清理尾部署名、免责声明、内联图片/base64 长串，并限制单封与整批上下文长度
-- 当上下文仍然偏长时，系统会先拆成两个子批次生成结构化 JSON 摘要，再做二次合并生成最终晨报
-- 中间摘要新增 `fact_subject / opinion_subject / info_type / source_evidence`，用于约束“事实/观点分离”和“真实主语归因”
-- 报告格式后处理已统一本地日期标题、短小节标题、独立粗体标签和 `投资启示/为什么重要` 等提示框样式
-- SMTP 发送支持 `587 + STARTTLS` 和 `465 + SSL`
-- SMTP 发送新增显式 timeout 与错误分类，弱网下会更快返回“超时 / 认证失败 / 连接失败”
-- 定时分析与补充分析窗口改为按真实 `America/New_York` 时区计算，并自动跳过周末
-- 当天白名单分析师邮件如果已全部到齐，会提前触发 daily；否则继续等到盘前 15 分钟 DDL
-- 已完成一轮真实联调：`yingjiachen99@gmail.com + yingjiachen99@outlook.com` 全部到齐后，系统会在 DDL 前立即发送一份 `daily`
-- `daily` 提前发送后，后续新增白名单邮件会先保持 `pending`，进入 supplement window 后再单独生成并发送 `supplement`
-
 ## 技术栈
 
 - **语言**: Python 3.9+
@@ -160,7 +151,7 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **大语言模型**: Kimi/MiniMax/GPT/MiMo/Sonnet
 - **文档解析**: extract-msg, PyPDF2, python-docx
 
-### 推荐LLM
+### LLM
 
 推荐使用 Kimi 系列模型（如 `kimi-k2.5` 或 `moonshot-v1-128k`）：
 
@@ -203,8 +194,43 @@ A: 检查 API 密钥是否正确，账户是否有足够配额
 **Q: 为什么有时报告格式不稳定？**
 A: 这是大模型 HTML 输出结构漂移导致的。当前 `save_report()` 已内建标题日期统一、伪小标题提升、提示框/标签标准化等后处理，但仍建议保留 smoke test 与人工 review。
 
-**Q: 为什么定时发送时间可能需要额外关注？**
-A: 当前项目已经具备定时/补充分析逻辑，并已完成一轮“early daily + supplement”联调；但美股节假日休市日历等边界仍值得继续优化。
+**Q: 系统的收发 DDL 和补发逻辑是怎样的？**
+A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。如果白名单分析师邮件提前全部到齐，系统会更早发送 `daily`；如果直到 DDL 仍未到齐，也不会继续等待。`daily` 发出后，若在开盘后 1 小时内收到新的白名单邮件，系统会走 `supplement` 补充分析并单独重试发送。
+
+## 最新进展
+
+### 今日已完成的优化
+
+- 服务端鉴权与白名单配置已改为按请求读取最新配置，便于联调时热更新 `allowed_senders`
+- 邮件收取、待处理状态、已发送记录统一落 SQLite，避免“分析对象”和“标记对象”错位
+- 数据库已补作用域唯一键与原子状态更新，减少并发去重和“已发出但仍 pending”的状态撕裂
+- 大模型分析前会清理尾部署名、免责声明、内联图片/base64 长串，并限制单封与整批上下文长度
+- 当上下文仍然偏长时，系统会先拆成两个子批次生成结构化 JSON 摘要，再做二次合并生成最终晨报
+- 中间摘要新增 `fact_subject / opinion_subject / info_type / source_evidence`，用于约束“事实/观点分离”和“真实主语归因”
+- SMTP 发送支持 `587 + STARTTLS` 和 `465 + SSL`，并新增显式 timeout 与错误分类
+- 定时分析与补充分析窗口改为按真实 `America/New_York` 时区计算，并自动跳过周末
+- 当天白名单分析师邮件如果已全部到齐，会提前触发 daily；否则继续等到盘前 15 分钟 DDL
+
+### 今日已验证的流程
+
+- 白名单正向邮件收取、分析、生成报告、自动发送
+- 非白名单邮件会进入 inbox，但被系统正确忽略
+- 幂等性成立：没有新 `pending` 时不会重复分析和重复生成报告
+- `.txt`、`.pdf`、图片附件已完成真实联调
+- Gmail / Outlook 两个白名单发件人都已完成真实联调
+- 备用模型切换已验证：主模型失败后可切到 `kimi_backup`
+- `early daily` 已验证：白名单分析师全部到齐后，会在 DDL 前提前发送 `daily`
+- `supplement` 已验证：`daily` 提前发送后，新增白名单邮件会先保持 `pending`，进入 supplement window 后再单独发送 `supplement`
+
+### 待优化项
+
+- 接入美股节假日休市日历
+- 大批量邮件 / 长附件压力场景验证与优化
+
+### 报告格式说明
+
+- HTML 格式稳定性主要依赖 `save_report()` 的后处理规范化，目前已覆盖本地日期标题、伪小标题提升、提示框/标签标准化
+- 这部分属于表现层优化，不影响主业务链路；后续如果要进一步收紧模板，可继续扩展 HTML 规范化规则
 
 ## License
 

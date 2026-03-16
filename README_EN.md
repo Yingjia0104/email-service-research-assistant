@@ -16,7 +16,6 @@ Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Rep
 - 🗃️ **SQLite State Management**: SQLite is the single source of truth for dedupe, pending emails, and sent-report history
 - 🧹 **Context Optimization**: Automatically trims signatures/disclaimers, strips inline image payloads, and bounds prompt size
 - 🔀 **Fault-Tolerant Analysis**: Primary model short-retries, then falls back to backup model; long batches are split and merged
-- 🧱 **HTML Normalization**: Stabilizes local-date title, fills incomplete HTML, and normalizes section headings/action boxes
 
 ## Report Content
 
@@ -76,24 +75,31 @@ cp config.yaml.example config.yaml
 # Edit config.yaml with your API keys and email settings
 ```
 
-**Required config fields:**
+**Minimum setup (receive + analyze only, without auto-sending reports):**
 - `api_key`: API access key
 - `kimi.api_key`: Kimi API key
 - `kimi_backup.api_key`: Backup model key (optional but strongly recommended)
+- `imap.email` / `imap.password`: Receiver email and app password
+
+**Full closed loop (receive + analyze + auto-send reports) adds:**
 - `smtp.email` / `smtp.password`: Sender email and app password
 - `smtp.timeout_seconds`: SMTP timeout in seconds (keep the default `30` unless you have a reason not to)
-- `imap.email` / `imap.password`: Receiver email and app password
 - `target.email`: Report destination email
 
+> In most real deployments, a single mailbox with both IMAP and SMTP capability is enough:
+> - it is the inbox the system monitors
+> - it is also the mailbox used to send the final report
+> - `target.email` can be this same mailbox address as well
+
 > **Notes**
-> - **Gmail**: Enable IMAP and generate an [App Password](https://support.google.com/accounts/answer/185833)
+> - **Gmail**: If you only need receiving + analysis, IMAP is enough; for the full closed loop, the same mailbox also needs SMTP sending capability and an [App Password](https://support.google.com/accounts/answer/185833)
 > - **Outlook/Exchange**:
 >   - Personal: Microsoft will disable Basic Auth in 2025-2026, recommend OAuth 2.0 migration
 >   - Enterprise: Admin needs to enable "Allow App Passwords" in Azure AD or configure OAuth 2.0
 >   - IMAP/SMTP: `outlook.office365.com` (IMAP: 993, SMTP: 587)
 > - **QQ Mail**:
 >   - Prefer SMTP `465 + SSL`
->   - Use IMAP/SMTP authorization codes rather than the mailbox login password
+>   - Use authorization codes rather than the mailbox login password for both receiving and sending
 >   - IMAP/SMTP: `imap.qq.com` (993), `smtp.qq.com` (465 / SSL)
 
 ### Running
@@ -135,19 +141,6 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
-
-### 2026-03-16 Key Iterations
-
-- Request-time config reload now applies to auth and sender allowlists, so `allowed_senders` can be hot-updated during testing
-- Email ingestion, pending state, and sent-report history now live in SQLite to avoid analysis/marking mismatches
-- Prompt construction now removes signatures/disclaimers, strips inline image payloads/base64 blobs, and caps single-email / batch context length
-- If context is still too large, the system first generates structured JSON summaries per sub-batch and then merges them into the final brief
-- Intermediate summaries now carry `fact_subject / opinion_subject / info_type / source_evidence` to preserve attribution and separate facts from quoted opinions
-- Post-processing now normalizes the report title to the local date and stabilizes pseudo-headings, labels, and action boxes
-- SMTP supports both `587 + STARTTLS` and `465 + SSL`, with explicit timeout and clearer error classification
-- Market trigger time and supplement window now use real `America/New_York` timezone handling and skip weekends
-- If all whitelisted analysts have already sent their emails for the day, the system sends the `daily` report early; otherwise it waits for the pre-market DDL
-- A full live test has been completed for the `early daily + supplement` flow: once Gmail + Outlook whitelist senders both arrived, `daily` was sent before the DDL, and a later email was sent separately as `supplement`
 
 ## Tech Stack
 
@@ -200,8 +193,43 @@ A: Check API key correctness and account quota
 **Q: Why can the report format still look slightly unstable sometimes?**
 A: Because the raw HTML still comes from an LLM. The project now includes HTML normalization for title dates, pseudo-headings, and action boxes, but smoke tests and manual review are still recommended.
 
-**Q: Why might the send schedule still need follow-up work?**
-A: The project now uses real timezone-aware market timing and has already passed one `early daily + supplement` live test. Holiday market-closure calendars are still a worthwhile future enhancement.
+**Q: How do the `daily` deadline and retry rules work?**
+A: By default, the system treats “15 minutes before the US market opens” as the `daily` send/receive DDL. If all expected whitelist senders arrive earlier, it can send `daily` before that point; if they have not all arrived by the DDL, it stops waiting and sends anyway. After `daily` has been sent, any new whitelist email received within 1 hour after the market opens is handled through `supplement`, which retries analysis and sends a separate supplemental brief.
+
+## Latest Progress
+
+### Optimizations Completed Today
+
+- Request-time config reload now applies to auth and sender allowlists, so `allowed_senders` can be hot-updated during testing
+- Email ingestion, pending state, and sent-report history now live in SQLite to avoid analysis/marking mismatches
+- The database layer now uses scoped uniqueness and atomic success finalization to reduce dedupe races and “sent but still pending” state splits
+- Prompt construction now removes signatures/disclaimers, strips inline image payloads/base64 blobs, and caps single-email / batch context length
+- If context is still too large, the system first generates structured JSON summaries per sub-batch and then merges them into the final brief
+- Intermediate summaries now carry `fact_subject / opinion_subject / info_type / source_evidence` to preserve attribution and separate facts from quoted opinions
+- SMTP supports both `587 + STARTTLS` and `465 + SSL`, with explicit timeout and clearer error classification
+- Market trigger time and supplement window now use real `America/New_York` timezone handling and skip weekends
+- If all whitelisted analysts have already sent their emails for the day, the system sends the `daily` report early; otherwise it waits for the pre-market DDL
+
+### Flows Verified Today
+
+- Whitelist-positive flow: receive, analyze, generate report, and auto-send
+- Non-whitelisted mail reaches the inbox but is correctly ignored by the system
+- Idempotency: no re-analysis and no duplicate report generation when there are no new pending emails
+- Real attachment tests completed for `.txt`, `.pdf`, and images
+- Real delivery tests completed for both Gmail and Outlook whitelist senders
+- Backup-model fallback verified: the system can switch to `kimi_backup` when the primary model fails
+- `early daily` verified: once all expected whitelist senders have arrived, `daily` is sent before the DDL
+- `supplement` verified: after `daily` is sent early, new whitelist mail remains `pending` first and is later sent separately during the supplement window
+
+### Future Optimization Items
+
+- Add a US market holiday calendar
+- Validate and optimize large-batch / long-attachment pressure scenarios
+
+### Report Formatting Notes
+
+- HTML formatting stability is mainly handled by `save_report()` post-processing, which already normalizes local-date titles, pseudo-headings, and action-box / label styles
+- This is presentation-layer work rather than core business logic; if you want the brief to look even closer to a fixed template, the HTML normalization rules can be extended further
 
 ## License
 

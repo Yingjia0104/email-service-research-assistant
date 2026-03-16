@@ -16,7 +16,7 @@ kimi_backup:
   base_url: "https://api.moonshot.ai/v1"
   model: "kimi-k2.5"
 
-# 发送方 (Gmail/Outlook SMTP)
+# 发送方 (Gmail/Outlook SMTP) - 完整闭环时配置；通常可与 IMAP 使用同一个邮箱
 smtp:
   host: "smtp.gmail.com"
   port: 587
@@ -32,7 +32,7 @@ imap:
   email: "your-email@gmail.com"
   password: "your-app-password"
 
-# 目标邮箱 (处理后发送到哪里)
+# 目标邮箱 (处理后发送到哪里；完整闭环时配置，通常可直接填同一个邮箱)
 target:
   email: "destination@example.com"
 
