@@ -13,6 +13,10 @@
 - 🤖 **AI 分析**：调用大模型分析卖方邮件，提取要点
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
+- 🗃️ **SQLite 状态管理**：以本地数据库作为去重、待处理、已发送记录的唯一事实来源
+- 🧹 **上下文优化**：自动裁掉邮件尾部署名/免责声明，压缩图片元数据，控制上下文长度
+- 🔀 **容错分析链路**：主模型短重试后自动切备用模型；超长输入会拆批分析后再合并
+- 🧱 **HTML 规范化**：统一本地日期标题、补全不完整 HTML、稳定小节层级与提示框样式
 
 ## 报告内容
 
@@ -31,8 +35,8 @@
 ## 可配选项
 
 - 关注的投行/分析师列表：支持后缀匹配（`@morganstanley.com`）或精确匹配（`analyst@gs.com`）
-- 关注的板块/公司 <!-- 迭代中 -->
-- 推送截止时间（美股盘前） <!-- 迭代中 -->
+- `kimi_backup`：可配置备用模型；注意需要真实可用的独立凭证，不能假设与主模型 endpoint/key 完全兼容
+- 关注的板块/公司（迭代中）
 
 ## 项目结构
 
@@ -40,12 +44,14 @@
 email-service/
 ├── main.py                      # FastAPI 服务入口
 ├── qclaw_mail_file.py          # 核心处理逻辑
+├── email_db.py                 # SQLite 状态与发送记录
 ├── config.yaml.example          # 配置文件模板
 ├── requirements.txt             # Python 依赖
 ├── generate_api_key.py         # API 密钥生成工具
 ├── reference_css.txt           # 报告格式 CSS
 ├── reference_body.txt          # 报告结构参考
 ├── HF_Morning_Brief_格式规范.md # 格式规范文档
+├── tests/test_smoke.py         # 关键烟测与回归测试
 ├── CLAUDE.md                   # AI 助手指南
 └── .gitignore                  # Git 忽略配置
 ```
@@ -72,7 +78,9 @@ cp config.yaml.example config.yaml
 **config.yaml 必填项：**
 - `api_key`: API 访问密钥
 - `kimi.api_key`: Kimi API 密钥
+- `kimi_backup.api_key`: 备用模型密钥（可选但强烈建议）
 - `smtp.email` / `smtp.password`: 发件邮箱和应用专用密码
+- `smtp.timeout_seconds`: SMTP 超时秒数（建议保留默认值 30）
 - `imap.email` / `imap.password`: 收件邮箱和应用专用密码
 - `target.email`: 报告发送目标邮箱
 
@@ -84,6 +92,10 @@ cp config.yaml.example config.yaml
 >   - 个人账户：微软将于 2025-2026 年停用基本身份验证，建议迁移至 OAuth 2.0
 >   - 企业账户：需管理员在 Azure AD 中启用「允许应用密码」或配置 OAuth 2.0
 >   - IMAP/SMTP 配置：`outlook.office365.com` (IMAP: 993, SMTP: 587)
+> - **QQ 邮箱**:
+>   - 建议 SMTP 使用 `465 + SSL`
+>   - IMAP/SMTP 都应使用授权码，不要直接用登录密码
+>   - IMAP/SMTP 配置：`imap.qq.com` (993), `smtp.qq.com` (465 / SSL)
 
 ### 运行
 
@@ -125,6 +137,21 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
 
+### 2026-03-16 关键迭代
+
+- 服务端鉴权与白名单配置已改为按请求读取最新配置，便于联调时热更新 `allowed_senders`
+- 邮件收取、待处理状态、已发送记录统一落 SQLite，避免“分析对象”和“标记对象”错位
+- 大模型分析前会清理尾部署名、免责声明、内联图片/base64 长串，并限制单封与整批上下文长度
+- 当上下文仍然偏长时，系统会先拆成两个子批次生成结构化 JSON 摘要，再做二次合并生成最终晨报
+- 中间摘要新增 `fact_subject / opinion_subject / info_type / source_evidence`，用于约束“事实/观点分离”和“真实主语归因”
+- 报告格式后处理已统一本地日期标题、短小节标题、独立粗体标签和 `投资启示/为什么重要` 等提示框样式
+- SMTP 发送支持 `587 + STARTTLS` 和 `465 + SSL`
+- SMTP 发送新增显式 timeout 与错误分类，弱网下会更快返回“超时 / 认证失败 / 连接失败”
+- 定时分析与补充分析窗口改为按真实 `America/New_York` 时区计算，并自动跳过周末
+- 当天白名单分析师邮件如果已全部到齐，会提前触发 daily；否则继续等到盘前 15 分钟 DDL
+- 已完成一轮真实联调：`yingjiachen99@gmail.com + yingjiachen99@outlook.com` 全部到齐后，系统会在 DDL 前立即发送一份 `daily`
+- `daily` 提前发送后，后续新增白名单邮件会先保持 `pending`，进入 supplement window 后再单独生成并发送 `supplement`
+
 ## 技术栈
 
 - **语言**: Python 3.9+
@@ -137,8 +164,8 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 
 推荐使用 Kimi 系列模型（如 `kimi-k2.5` 或 `moonshot-v1-128k`）：
 
-- **超长上下文**：支持 128K-256K tokens，无需截断即可处理多封邮件 + 完整附件内容
-- **多模态理解**：支持图片理解，可直接分析邮件中的图表、截图等视觉内容
+- **长上下文能力强**：适合多封邮件与长附件摘要；本项目当前仍会主动做截断、清洗与拆批，以换取更稳定的报告生成
+- **多模态理解**：适合图表/截图场景；当前默认策略会优先保留图片元数据与上下文描述，而不是直接内联大段图片数据
 
 ## 安全注意事项
 
@@ -154,7 +181,7 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 
 ### 3. 邮件数据
 - 邮件内容仅保存在本地
-- 定期清理 `pending_emails.json` 等临时文件
+- 当前主要状态保存在 `emails.db`；`pending_emails.json` 仅为兼容旧流程保留
 - 敏感邮件建议在虚拟机或隔离环境中处理
 
 ### 4. 第三方服务
@@ -172,6 +199,12 @@ A: 需要开启"应用专用密码"，不要使用邮箱登录密码
 
 **Q: LLM API 报错？**
 A: 检查 API 密钥是否正确，账户是否有足够配额
+
+**Q: 为什么有时报告格式不稳定？**
+A: 这是大模型 HTML 输出结构漂移导致的。当前 `save_report()` 已内建标题日期统一、伪小标题提升、提示框/标签标准化等后处理，但仍建议保留 smoke test 与人工 review。
+
+**Q: 为什么定时发送时间可能需要额外关注？**
+A: 当前项目已经具备定时/补充分析逻辑，并已完成一轮“early daily + supplement”联调；但美股节假日休市日历等边界仍值得继续优化。
 
 ## License
 

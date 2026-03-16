@@ -12,7 +12,7 @@ kimi:
 
 # 备用 API 配置（当前API余额不足时自动切换）
 kimi_backup:
-  api_key: "sk-v8otxhLoPWBwRrsfS9LuuNu3hMithS27o4urcBZsbBsVIG1d"
+  api_key: "your-backup-api-key"
   base_url: "https://api.moonshot.ai/v1"
   model: "kimi-k2.5"
 
@@ -20,6 +20,8 @@ kimi_backup:
 smtp:
   host: "smtp.gmail.com"
   port: 587
+  use_ssl: false
+  timeout_seconds: 30
   email: "your-email@gmail.com"
   password: "your-app-password"
 
@@ -43,8 +45,18 @@ filters:
     - "@goldmansachs.com"
     - "@bofa.com"
     - "@ubs.com"
+  # 联调时可选：忽略某个本地时间点之前的历史邮件
+  # received_after_local: "2026-03-16T19:22:21+08:00"
 
 
 server:
-  host: "0.0.0.0"
+  # 安全起见默认仅监听本机；如需局域网访问请自行改为 0.0.0.0 并配防火墙/VPN
+  host: "127.0.0.1"
   port: 8877
+
+background:
+  enabled: true
+  interval_minutes: 15
+  limit: 20
+  # DDL 定时分析；如仅想依赖“全员到齐即提前触发 daily”，可临时设为 false
+  analysis_enabled: true

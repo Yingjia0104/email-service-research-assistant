@@ -13,6 +13,10 @@ Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Rep
 - 🤖 **AI Analysis**: Call LLM to analyze sell-side emails and extract key insights
 - 📊 **Report Generation**: Generate professional HF Morning Brief format reports
 - 📤 **Auto Send**: Auto-send reports via SMTP to designated email
+- 🗃️ **SQLite State Management**: SQLite is the single source of truth for dedupe, pending emails, and sent-report history
+- 🧹 **Context Optimization**: Automatically trims signatures/disclaimers, strips inline image payloads, and bounds prompt size
+- 🔀 **Fault-Tolerant Analysis**: Primary model short-retries, then falls back to backup model; long batches are split and merged
+- 🧱 **HTML Normalization**: Stabilizes local-date title, fills incomplete HTML, and normalizes section headings/action boxes
 
 ## Report Content
 
@@ -31,8 +35,9 @@ See [HF_Morning_Brief_Format_Spec.md](./HF_Morning_Brief_格式规范.md) for de
 ## Configurable Options
 
 - Target investment banks/analysts list: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
-- Target sectors/companies <!-- WIP -->
-- Push cutoff time (pre-US market) <!-- WIP -->
+- Backup model via `kimi_backup`
+- Early daily send once all whitelisted senders have arrived; otherwise wait until the pre-market DDL
+- Supplement analysis during the pre-open / post-open window for late arrivals
 
 ## Project Structure
 
@@ -40,12 +45,14 @@ See [HF_Morning_Brief_Format_Spec.md](./HF_Morning_Brief_格式规范.md) for de
 email-service/
 ├── main.py                      # FastAPI service entry
 ├── qclaw_mail_file.py          # Core processing logic
+├── email_db.py                 # SQLite state and send history
 ├── config.yaml.example          # Config file template
 ├── requirements.txt             # Python dependencies
 ├── generate_api_key.py         # API key generator
 ├── reference_css.txt           # Report CSS styles
 ├── reference_body.txt          # Report structure reference
-├── HF_Morning_Brief_Format_Spec.md # Format specification
+├── HF_Morning_Brief_格式规范.md # Format specification
+├── tests/test_smoke.py         # Smoke / regression tests
 ├── CLAUDE.md                   # AI assistant guide
 └── .gitignore                  # Git ignore config
 ```
@@ -72,7 +79,9 @@ cp config.yaml.example config.yaml
 **Required config fields:**
 - `api_key`: API access key
 - `kimi.api_key`: Kimi API key
+- `kimi_backup.api_key`: Backup model key (optional but strongly recommended)
 - `smtp.email` / `smtp.password`: Sender email and app password
+- `smtp.timeout_seconds`: SMTP timeout in seconds (keep the default `30` unless you have a reason not to)
 - `imap.email` / `imap.password`: Receiver email and app password
 - `target.email`: Report destination email
 
@@ -82,6 +91,10 @@ cp config.yaml.example config.yaml
 >   - Personal: Microsoft will disable Basic Auth in 2025-2026, recommend OAuth 2.0 migration
 >   - Enterprise: Admin needs to enable "Allow App Passwords" in Azure AD or configure OAuth 2.0
 >   - IMAP/SMTP: `outlook.office365.com` (IMAP: 993, SMTP: 587)
+> - **QQ Mail**:
+>   - Prefer SMTP `465 + SSL`
+>   - Use IMAP/SMTP authorization codes rather than the mailbox login password
+>   - IMAP/SMTP: `imap.qq.com` (993), `smtp.qq.com` (465 / SSL)
 
 ### Running
 
@@ -123,6 +136,19 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
 
+### 2026-03-16 Key Iterations
+
+- Request-time config reload now applies to auth and sender allowlists, so `allowed_senders` can be hot-updated during testing
+- Email ingestion, pending state, and sent-report history now live in SQLite to avoid analysis/marking mismatches
+- Prompt construction now removes signatures/disclaimers, strips inline image payloads/base64 blobs, and caps single-email / batch context length
+- If context is still too large, the system first generates structured JSON summaries per sub-batch and then merges them into the final brief
+- Intermediate summaries now carry `fact_subject / opinion_subject / info_type / source_evidence` to preserve attribution and separate facts from quoted opinions
+- Post-processing now normalizes the report title to the local date and stabilizes pseudo-headings, labels, and action boxes
+- SMTP supports both `587 + STARTTLS` and `465 + SSL`, with explicit timeout and clearer error classification
+- Market trigger time and supplement window now use real `America/New_York` timezone handling and skip weekends
+- If all whitelisted analysts have already sent their emails for the day, the system sends the `daily` report early; otherwise it waits for the pre-market DDL
+- A full live test has been completed for the `early daily + supplement` flow: once Gmail + Outlook whitelist senders both arrived, `daily` was sent before the DDL, and a later email was sent separately as `supplement`
+
 ## Tech Stack
 
 - **Language**: Python 3.9+
@@ -135,8 +161,8 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 
 Use Kimi series models (e.g., `kimi-k2.5` or `moonshot-v1-128k`):
 
-- **Long Context**: Supports 128K-256K tokens, no truncation needed for multiple emails + full attachments
-- **Multimodal Understanding**: Supports image understanding, can analyze charts and screenshots directly
+- **Long Context**: Strong fit for multiple emails and long attachments; this project still actively sanitizes, trims, and splits input for more stable output
+- **Multimodal Understanding**: Useful for charts and screenshots; the default flow currently preserves image metadata/context instead of inlining large image payloads
 
 ## Security Notes
 
@@ -152,7 +178,7 @@ Use Kimi series models (e.g., `kimi-k2.5` or `moonshot-v1-128k`):
 
 ### 3. Email Data
 - Email content is stored locally only
-- Regularly clean up temporary files like `pending_emails.json`
+- Core state lives in `emails.db`; `pending_emails.json` remains only for backward compatibility
 - Consider using VM or isolated environment for sensitive emails
 
 ### 4. Third-Party Services
@@ -170,6 +196,12 @@ A: Need to enable "App Password", do not use email login password
 
 **Q: LLM API error?**
 A: Check API key correctness and account quota
+
+**Q: Why can the report format still look slightly unstable sometimes?**
+A: Because the raw HTML still comes from an LLM. The project now includes HTML normalization for title dates, pseudo-headings, and action boxes, but smoke tests and manual review are still recommended.
+
+**Q: Why might the send schedule still need follow-up work?**
+A: The project now uses real timezone-aware market timing and has already passed one `early daily + supplement` live test. Holiday market-closure calendars are still a worthwhile future enhancement.
 
 ## License
 
