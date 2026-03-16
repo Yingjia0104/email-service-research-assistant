@@ -117,15 +117,16 @@ def get_emails(
         filters = config.get("filters", {})
         allowed_senders = filters.get("allowed_senders", [])
 
-        # 日期过滤：获取今天和昨天的邮件（美股盘前逻辑）
+        # 日期过滤：获取今天和昨天的邮件（基于系统本地时区）
         from datetime import datetime, timedelta
 
-        # 获取北京时间
-        now_bj = datetime.now()
-        today = now_bj.date()
+        # 自动获取系统本地时区
+        local_tz = datetime.now().astimezone().tzinfo
+        now_local = datetime.now(local_tz)
+        today = now_local.date()
         yesterday = today - timedelta(days=1)
 
-        logger.info(f"📅 日期过滤: {yesterday.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')} (北京时间)")
+        logger.info(f"📅 日期过滤: {yesterday.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')} (本地时区: {local_tz})")
         logger.info(f"🔍 发件人过滤: {allowed_senders}")
 
         with MailBox(source, timeout=30).login(email_addr, email_pass) as mailbox:
