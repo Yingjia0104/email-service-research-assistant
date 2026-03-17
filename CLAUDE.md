@@ -5,7 +5,7 @@
 这是一个自动化邮件研究系统，可以：
 - 通过 IMAP 收取 Gmail 邮件
 - 自动解析邮件附件（.msg, .pdf, .docx 等）
-- 调用 Kimi 大模型分析卖方邮件
+- 调用通用 LLM（如 Moonshot / OpenAI）分析卖方邮件
 - 生成专业 HF Morning Brief 格式的投资报告
 - 通过 SMTP 发送报告到指定邮箱
 - 使用 SQLite 管理邮件去重、待处理状态与发送记录
@@ -20,7 +20,6 @@
 ├── requirements.txt     # Python 依赖
 ├── reference_css.txt   # 报告格式校准用 CSS
 ├── reference_body.txt  # 报告结构参考
-├── HF_Morning_Brief_格式规范.md  # 报告格式规范
 ├── tests/test_smoke.py # 关键 smoke test / 回归测试
 └── generate_api_key.py # API 密钥生成工具
 ```
@@ -32,11 +31,11 @@
 编辑 `config.yaml`：
 ```yaml
 api_key: "your-secret-key"
-kimi:
-  api_key: "your-kimi-api-key"
+llm:
+  api_key: "your-primary-llm-api-key"
   base_url: "https://api.moonshot.cn/v1"
-  model: "moonshot-v1-128k"
-kimi_backup:
+  model: "kimi-k2.5"
+llm_backup:
   api_key: "your-backup-api-key"
   base_url: "https://api.moonshot.ai/v1"
   model: "kimi-k2.5"
@@ -64,7 +63,7 @@ server:
 ```
 
 说明：
-- `kimi_backup` 为强烈建议项，但必须使用真实可用的独立凭证；不要假设任意 Moonshot endpoint 都接受同一组 key
+- `llm_backup` 为强烈建议项，但必须使用真实可用的独立凭证；不要假设任意兼容接口都接受同一组 key
 - QQ 邮箱建议 SMTP 使用 `465 + SSL`
 
 ### 2. 安装依赖
@@ -91,7 +90,7 @@ python qclaw_mail_file.py
 python qclaw_mail_file.py
 ```
 
-流程：收取邮件 → Kimi AI 分析 → 生成报告 → 发送邮件
+流程：收取邮件 → LLM 分析 → 生成报告 → 发送邮件
 
 ### 方式二：仅分析模式
 
@@ -133,8 +132,6 @@ POST http://localhost:8877/api/send?api_key=YOUR_KEY
 - Peripheral Intelligence（外围信息映射）
 - Actionable Ideas（可执行建议）
 
-格式规范详见 `HF_Morning_Brief_格式规范.md`
-
 ## 2026-03-16 关键迭代
 
 1. 状态流转改为以 `emails.db` 为唯一事实来源，解决了“分析对象”和“标记 processed 对象”可能错位的问题
@@ -154,7 +151,7 @@ POST http://localhost:8877/api/send?api_key=YOUR_KEY
 ## 注意事项
 
 1. **Gmail 配置**：需要开启"应用专用密码"
-2. **Kimi API**：免费额度有限，注意使用频率
+2. **LLM API**：不同提供方额度和限速策略不同，注意监控调用频率
 3. **过滤器**：`config.yaml` 中的 `allowed_senders` 可限制处理特定发件人
 4. **时区**：系统使用北京时间 (Asia/Shanghai)
 5. **定时逻辑**：当前已完成一轮 early daily / supplement 联调，但美股节假日休市日历等边界仍值得继续优化
@@ -164,7 +161,7 @@ POST http://localhost:8877/api/send?api_key=YOUR_KEY
 **Q: 邮件附件解析失败？**
 A: 确保安装了 `extract-msg` 库，用于解析 .msg 文件
 
-**Q: Kimi API 超时？**
+**Q: LLM API 超时？**
 A: 检查网络连接，或调整 `qclaw_mail_file.py` 中的超时设置
 
 **Q: 如何生成新的 API 密钥？**

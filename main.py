@@ -68,6 +68,42 @@ background_tasks = []
 analysis_task_lock = asyncio.Lock()
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif')
 MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS = 12000
+ATTACHMENT_SIGNATURE_MARKERS = (
+    "best regards",
+    "kind regards",
+    "warm regards",
+    "regards",
+    "many thanks",
+    "thanks,",
+    "thanks and regards",
+    "thank you,",
+    "cheers,",
+    "sent from my iphone",
+    "sent from my ipad",
+    "sent from outlook",
+    "sent via outlook",
+    "此致",
+    "敬礼",
+    "祝好",
+    "谢谢",
+    "--",
+)
+ATTACHMENT_DISCLAIMER_MARKERS = (
+    "免责声明",
+    "confidentiality notice",
+    "this message and any attachment",
+    "this e-mail and any attachments",
+    "this email and any attachments",
+    "the information contained in this e-mail",
+    "the information contained in this email",
+    "the contents of this email",
+    "privileged and confidential",
+    "本邮件及其附件",
+    "本电子邮件",
+    "重要提示",
+    "法律声明",
+)
 
 
 def _extract_attachment_bytes(att):
@@ -77,6 +113,47 @@ def _extract_attachment_bytes(att):
     if hasattr(att, "data") and isinstance(att.data, bytes):
         return att.data
     return None
+
+
+def _clean_extracted_attachment_text(text, filename=""):
+    """清洗 .msg/.eml/.pdf 等附件提取文本，避免原始转发噪音压垮分析上下文。"""
+    if not text:
+        return ""
+
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = cleaned.replace("\u200b", " ").replace("\xa0", " ")
+    cleaned = re.sub(r"<https?://[^>\s]+>", "[link]", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"https?://\S+", "[link]", cleaned, flags=re.IGNORECASE)
+
+    kept_lines = []
+    meaningful_chars = 0
+    non_empty_lines = 0
+
+    for line in cleaned.split("\n"):
+        stripped = line.strip()
+        normalized = stripped.lower()
+
+        if stripped:
+            non_empty_lines += 1
+            meaningful_chars += len(stripped)
+
+        has_enough_content = meaningful_chars >= 80 or non_empty_lines >= 4
+        if has_enough_content:
+            if any(normalized.startswith(marker) for marker in ATTACHMENT_SIGNATURE_MARKERS) and len(stripped) <= 120:
+                break
+            if any(marker in normalized for marker in ATTACHMENT_DISCLAIMER_MARKERS):
+                break
+
+        kept_lines.append(line)
+
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+    if len(cleaned) > MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS:
+        cleaned = cleaned[:MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS].rstrip() + "\n\n[附件内容已截断]"
+
+    return cleaned
 
 
 def _build_attachment_records(msg):
@@ -171,6 +248,8 @@ def _build_attachment_records(msg):
                     att_text = nested_msg.body or ""
                 except Exception as e:
                     logger.warning(f"EML解析失败 {filename}: {e}")
+
+            att_text = _clean_extracted_attachment_text(att_text, filename=filename)
 
             if att_text and att_text.strip():
                 attachment_contents.append({

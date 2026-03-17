@@ -4,22 +4,35 @@
 
 自动化邮件分析和推送助手，将卖方邮件转化为专业的 HF Morning Brief 投资报告。
 
-## 功能特性
+## 业务流程
 
 邮件接收 → 智能解析 → AI分析 → 观点抽取 → 报告生成 → 交易日推送
 
+## 功能及特性
+
+### 业务功能
+
 - 📧 **邮件收取**：通过 IMAP 自动过滤出重点关注的卖方邮件
 - 📎 **智能解析**：自动解析邮件正文和附件，支持.msg, .pdf, .docx, .txt格式的附件
-- 🤖 **AI分析**：调用大模型分析卖方邮件，提取要点
+- 🤖 **AI分析**：调用大模型分析卖方邮件，提炼主线、市场态度与 thesis
 - 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
+
+### 系统特性
+
 - 🗃️ **SQLite状态管理**：以本地数据库作为去重、待处理、已发送记录的唯一事实来源
 - 🧹 **上下文优化与多模态理解**：自动裁掉邮件尾部署名/免责声明，并将图片附件走多模态输入
 - 🔀 **容错分析链路**：主模型短重试后自动切备用模型；超长输入会拆批分析后再合并
+- 🧠 **角色化研究输出**：支持按不同使用者角色配置研究视角与晨报口径
 
 ## 报告内容
 
-生成的报告遵循高效简炼的格式：
+基于角色指南（Persona）生成高效简炼的高效简炼：
+
+ - 角色指南(Persona)详见 [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
+
+
+##### 报告结构 #####
 
 | 章节 | 内容 |
 |------|------|
@@ -29,12 +42,11 @@
 | Peripheral Intelligence | 外围信息映射 |
 | Actionable Ideas | 可执行建议 |
 
-详见 [HF_Morning_Brief_格式规范.md](./HF_Morning_Brief_格式规范.md)
 
 ## 可配选项
 
+面向投研使用者：
 - 关注的投行/分析师列表：支持后缀匹配（`@morganstanley.com`）或精确匹配（`analyst@gs.com`）
-- `kimi_backup`：可配置备用模型；注意需要真实可用的独立凭证，不能假设与主模型 endpoint/key 完全兼容
 - 关注的板块/公司：迭代中，敬请期待
 
 ## 项目结构
@@ -49,7 +61,7 @@ email-service/
 ├── generate_api_key.py         # API 密钥生成工具
 ├── reference_css.txt           # 报告格式 CSS
 ├── reference_body.txt          # 报告结构参考
-├── HF_Morning_Brief_格式规范.md # 格式规范文档
+├── HF_Morning_Brief_role_guidance候选.md # 角色指南候选
 ├── tests/test_smoke.py         # 关键烟测与回归测试
 ├── CLAUDE.md                   # AI 助手指南
 └── .gitignore                  # Git 忽略配置
@@ -76,8 +88,9 @@ cp config.yaml.example config.yaml
 
 **最小配置（仅收信 + 分析，不自动发回报告）：**
 - `api_key`: API 访问密钥
-- `kimi.api_key`: Kimi API 密钥
-- `kimi_backup.api_key`: 备用模型密钥（可选但强烈建议）
+- `llm.api_key` / `llm.api_key_env`: 主模型 API 密钥或环境变量名
+- `llm_backup.api_key`: 第一备用模型密钥（可选但强烈建议）
+- `llm_backup2.api_key` / `llm_backup2.api_key_env`: 第二备用模型密钥（可选）
 - `imap.email` / `imap.password`: 收件邮箱和应用专用密码
 
 **完整闭环（收信 + 分析 + 自动发送报告）时额外配置：**
@@ -148,15 +161,17 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **语言**: Python 3.9+
 - **Web 框架**: FastAPI
 - **邮件**: imap-tools, smtplib
-- **大语言模型**: Kimi/MiniMax/GPT/MiMo/Sonnet
+- **大语言模型**: 通用 LLM（支持 Moonshot / OpenAI / MiniMax / MiMo / Sonnet 等兼容接口）
 - **文档解析**: extract-msg, PyPDF2, python-docx
 
-### LLM
+## LLM
 
-推荐使用已在本项目中完成多模态联调的 Kimi 系列模型（默认示例为 `kimi-k2.5`）：
+当前默认示例是 `Kimi` 作为主模型，另配 `Kimi + GPT-5.4` 两级备用：
 
-- **长上下文能力强**：适合多封邮件与长附件摘要；本项目当前仍会主动做截断、清洗与拆批，以换取更稳定的报告生成
-- **多模态理解**：图片附件会默认以多模态消息块送入模型，而不是只保留文件名和大小等元数据
+- **主模型示例**：`kimi-k2.5 + supports_vision: true`
+- **第一备用模型示例**：`kimi-k2.5 + supports_vision: true`
+- **第二备用模型示例**：`gpt-5.4 + supports_vision: true + reasoning_effort: medium`
+- **切换策略**：主模型未配置可用 key 或调用失败时，系统会自动尝试 `llm_backup`，再尝试 `llm_backup2`
 
 ## 安全注意事项
 
@@ -176,7 +191,7 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - 敏感邮件建议在虚拟机或隔离环境中处理
 
 ### 4. 第三方服务
-- 仅使用官方渠道注册的服务（Gmail, Kimi 等）
+- 仅使用官方渠道注册的服务（Gmail、OpenAI、Moonshot 等）
 - 定期检查账户安全设置
 - 启用双因素认证（2FA）
 
@@ -219,7 +234,7 @@ A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。
 - `.txt`、`.pdf`、图片附件已完成真实联调
 - Gmail / Outlook 两个白名单发件人都已完成真实联调
 - `kimi-k2.5 + supports_vision: true` 已完成真实多模态联调：图片附件与正文内嵌图片都能被提取成多模态输入并成功生成/发送报告
-- 备用模型切换已验证：主模型失败后可切到 `kimi_backup`
+- 多级备用模型切换已验证：主模型失败后可继续尝试 `llm_backup` / `llm_backup2`
 - `early daily` 已验证：白名单分析师全部到齐后，会在 DDL 前提前发送 `daily`
 - `supplement` 已验证：`daily` 提前发送后，新增白名单邮件会先保持 `pending`，进入 supplement window 后再单独发送 `supplement`
 
@@ -227,11 +242,8 @@ A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。
 
 - 接入美股节假日休市日历
 - 大批量邮件 / 长附件压力场景验证与优化
+- 长上下文拆批时，图片信息目前只在子批次阶段做多模态理解，合并阶段可能出现图像 insight 衰减；后续可考虑补充更显式的 image insights / image evidence 保留机制
 
-### 报告格式说明
-
-- HTML 格式稳定性主要依赖 `save_report()` 的后处理规范化，目前已覆盖本地日期标题、伪小标题提升、提示框/标签标准化
-- 这部分属于表现层优化，不影响主业务链路；后续如果要进一步收紧模板，可继续扩展 HTML 规范化规则
 
 ## License
 

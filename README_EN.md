@@ -8,14 +8,20 @@ An automated email research system that converts sell-side emails into professio
 
 Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Report Generation → Everyday Push
 
+Business Functions:
+
 - 📧 **Email Receiving**: IMAP-based filtering of targeted sell-side emails
 - 📎 **Smart Parsing**: Auto-parse email body and attachments (.msg, .pdf, .docx, .txt)
-- 🤖 **AI Analysis**: Call LLM to analyze sell-side emails and extract key insights
+- 🤖 **AI Analysis**: Use an LLM to extract the key market narrative, stance, and thesis from sell-side emails
 - 📊 **Report Generation**: Generate professional HF Morning Brief format reports
 - 📤 **Auto Send**: Auto-send reports via SMTP to designated email
+
+System Traits:
+
 - 🗃️ **SQLite State Management**: SQLite is the single source of truth for dedupe, pending emails, and sent-report history
 - 🧹 **Context Optimization**: Automatically trims signatures/disclaimers, strips inline image/base64 noise, and sends image attachments through multimodal input
 - 🔀 **Fault-Tolerant Analysis**: Primary model short-retries, then falls back to backup model; long batches are split and merged
+- 🧠 **Persona-Based Research Output**: Supports configurable research personas for different end users and briefing styles
 
 ## Report Content
 
@@ -29,14 +35,17 @@ Generated reports follow an efficient format:
 | Peripheral Intelligence | Peripheral information mapping |
 | Actionable Ideas | Actionable suggestions |
 
-See [HF_Morning_Brief_Format_Spec.md](./HF_Morning_Brief_格式规范.md) for details.
-
 ## Configurable Options
 
+For investment users:
+
 - Target investment banks/analysts list: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
-- Backup model via `kimi_backup`
-- Early daily send once all whitelisted senders have arrived; otherwise wait until the pre-market DDL
-- Supplement analysis during the pre-open / post-open window for late arrivals
+- Sector/company focus: still evolving, reserved for future iterations
+- Persona guidance: see [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
+
+For product / system setup:
+
+- Multi-level LLM fallback via `llm_backup` / `llm_backup2`
 
 ## Project Structure
 
@@ -50,7 +59,7 @@ email-service/
 ├── generate_api_key.py         # API key generator
 ├── reference_css.txt           # Report CSS styles
 ├── reference_body.txt          # Report structure reference
-├── HF_Morning_Brief_格式规范.md # Format specification
+├── HF_Morning_Brief_role_guidance候选.md # Persona / role guidance candidates
 ├── tests/test_smoke.py         # Smoke / regression tests
 ├── CLAUDE.md                   # AI assistant guide
 └── .gitignore                  # Git ignore config
@@ -77,8 +86,9 @@ cp config.yaml.example config.yaml
 
 **Minimum setup (receive + analyze only, without auto-sending reports):**
 - `api_key`: API access key
-- `kimi.api_key`: Kimi API key
-- `kimi_backup.api_key`: Backup model key (optional but strongly recommended)
+- `llm.api_key` / `llm.api_key_env`: Primary model API key or environment variable name
+- `llm_backup.api_key`: First backup model key (optional but strongly recommended)
+- `llm_backup2.api_key` / `llm_backup2.api_key_env`: Second backup model key (optional)
 - `imap.email` / `imap.password`: Receiver email and app password
 
 **Full closed loop (receive + analyze + auto-send reports) adds:**
@@ -147,15 +157,17 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **Language**: Python 3.9+
 - **Web Framework**: FastAPI
 - **Email**: imap-tools, smtplib
-- **LLM**: Kimi/MiniMax/GPT/MiMo/Sonnet
+- **LLM**: Generic LLM routing across Moonshot / OpenAI / MiniMax / MiMo / Sonnet style providers
 - **Document Parsing**: extract-msg, PyPDF2, python-docx
 
 ### Recommended LLM
 
-Use a Kimi model that has been validated in this project for multimodal runs (the default example is `kimi-k2.5`):
+The default example now uses `Kimi` as the primary model, with `Kimi + GPT-5.4` as two backup layers:
 
-- **Long Context**: Strong fit for multiple emails and long attachments; this project still actively sanitizes, trims, and splits input for more stable output
-- **Multimodal Understanding**: Image attachments are now sent as multimodal content blocks instead of being reduced to filename/size metadata only
+- **Primary model example**: `kimi-k2.5 + supports_vision: true`
+- **First backup example**: `kimi-k2.5 + supports_vision: true`
+- **Second backup example**: `gpt-5.4 + supports_vision: true + reasoning_effort: medium`
+- **Fallback behavior**: if the primary model has no usable key or fails at runtime, the system automatically tries `llm_backup`, then `llm_backup2`
 
 ## Security Notes
 
@@ -175,7 +187,7 @@ Use a Kimi model that has been validated in this project for multimodal runs (th
 - Consider using VM or isolated environment for sensitive emails
 
 ### 4. Third-Party Services
-- Only use official channels (Gmail, Kimi, etc.)
+- Only use official channels (Gmail, OpenAI, Moonshot, etc.)
 - Regularly review account security settings
 - Enable Two-Factor Authentication (2FA)
 
@@ -218,7 +230,7 @@ A: By default, the system treats “15 minutes before the US market opens” as 
 - Real attachment tests completed for `.txt`, `.pdf`, and images
 - Real delivery tests completed for both Gmail and Outlook whitelist senders
 - `kimi-k2.5 + supports_vision: true` has now been validated end-to-end for multimodal runs: both image attachments and inline-body images were converted into multimodal inputs and successfully produced/sent a report
-- Backup-model fallback verified: the system can switch to `kimi_backup` when the primary model fails
+- Multi-level fallback verified: the system can continue from the primary model to `llm_backup` / `llm_backup2` when needed
 - `early daily` verified: once all expected whitelist senders have arrived, `daily` is sent before the DDL
 - `supplement` verified: after `daily` is sent early, new whitelist mail remains `pending` first and is later sent separately during the supplement window
 
@@ -226,6 +238,7 @@ A: By default, the system treats “15 minutes before the US market opens” as 
 
 - Add a US market holiday calendar
 - Validate and optimize large-batch / long-attachment pressure scenarios
+- In split-batch runs, images are interpreted multimodally only at the sub-batch stage; some image insight can be compressed away during the final merge, so a more explicit `image_insights / image_evidence` carry-over is a good next improvement
 
 ### Report Formatting Notes
 

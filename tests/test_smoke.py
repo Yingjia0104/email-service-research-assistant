@@ -19,6 +19,7 @@ class SmokeTests(unittest.TestCase):
             text = f.read()
         self.assertNotIn("sk-", text)
         self.assertIn('model: "kimi-k2.5"', text)
+        self.assertIn('api_key_env: "OPENAI_API_KEY"', text)
         self.assertIn("supports_vision: true", text)
 
     def test_send_report_uses_query_api_key(self):
@@ -247,6 +248,34 @@ class SmokeTests(unittest.TestCase):
 
         self.assertTrue(arrived)
 
+    def test_clean_extracted_attachment_text_strips_links_and_disclaimer(self):
+        import main
+
+        raw = (
+            "Top line view\n"
+            "https://example.com/really/long/link\n"
+            "Second insight\n"
+            "Confidentiality Notice: this email and any attachments are privileged\n"
+            "Trailing text that should disappear\n"
+        )
+
+        cleaned = main._clean_extracted_attachment_text(raw, filename="note.msg")
+
+        self.assertIn("Top line view", cleaned)
+        self.assertIn("Second insight", cleaned)
+        self.assertIn("[link]", cleaned)
+        self.assertNotIn("https://example.com", cleaned)
+        self.assertNotIn("Trailing text that should disappear", cleaned)
+
+    def test_clean_extracted_attachment_text_truncates_long_msg_body(self):
+        import main
+
+        raw = ("alpha beta gamma\n" * 4000)
+        cleaned = main._clean_extracted_attachment_text(raw, filename="long.msg")
+
+        self.assertIn("[附件内容已截断]", cleaned)
+        self.assertLessEqual(len(cleaned), main.MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS + 20)
+
     def test_verify_api_key_uses_fresh_config(self):
         import main
 
@@ -310,12 +339,11 @@ class SmokeTests(unittest.TestCase):
             "date": "2026-03-16 00:00:00+08:00",
             "body": "b",
         }]
-        format_spec = "spec"
         real_cfg = {"api_key": "backup-key", "base_url": "https://backup.example/v1", "model": "backup-model"}
         calls = []
 
         def fake_load():
-            qclaw_mail_file.KIMI_BACKUP_CONFIG.update(real_cfg)
+            qclaw_mail_file.LLM_BACKUP_CONFIG.update(real_cfg)
             return {"api_key": "primary-key", "base_url": "https://primary.example/v1", "model": "primary-model"}
 
         def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None):
@@ -355,10 +383,10 @@ class SmokeTests(unittest.TestCase):
               }
             }"""
 
-        with patch.object(qclaw_mail_file, "load_kimi_config", side_effect=fake_load):
-            with patch.object(qclaw_mail_file, "call_kimi_api", side_effect=fake_call):
+        with patch.object(qclaw_mail_file, "load_llm_config", side_effect=fake_load):
+            with patch.object(qclaw_mail_file, "call_llm_api", side_effect=fake_call):
                 with patch.object(qclaw_mail_file.time, "sleep", return_value=None):
-                    result = qclaw_mail_file.analyze_emails_with_kimi(emails, format_spec)
+                    result = qclaw_mail_file.analyze_emails_with_llm(emails)
 
         self.assertIn("NVDA 推理链路", result)
         self.assertEqual(
@@ -369,6 +397,101 @@ class SmokeTests(unittest.TestCase):
                 "https://backup.example/v1",
             ],
         )
+
+    def test_missing_primary_key_skips_to_backup(self):
+        import qclaw_mail_file
+
+        emails = [{
+            "subject": "s",
+            "from_name": "n",
+            "from": "a@example.com",
+            "date": "2026-03-16 00:00:00+08:00",
+            "body": "b",
+        }]
+        calls = []
+
+        def fake_load():
+            qclaw_mail_file.LLM_BACKUP_CONFIG.update({
+                "api_key": "backup-key",
+                "base_url": "https://backup.example/v1",
+                "model": "kimi-k2.5",
+            })
+            return {
+                "api_key": "",
+                "api_key_env": "OPENAI_API_KEY",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-5.4",
+                "supports_vision": True,
+                "reasoning_effort": "medium",
+            }
+
+        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None):
+            calls.append(api_config["base_url"])
+            return """{
+              "executive_summary": {"market_background": "背景", "key_signals": ["信号"]},
+              "core_events": [],
+              "local_news": [],
+              "peripheral_intelligence": {"mapped_events": [], "cross_market_signals": []},
+              "actionable_ideas": {"short_term": [], "medium_term": [], "catalysts": [], "bottom_line": "结论"}
+            }"""
+
+        with patch.object(qclaw_mail_file, "load_llm_config", side_effect=fake_load):
+            with patch.object(qclaw_mail_file, "call_llm_api", side_effect=fake_call):
+                result = qclaw_mail_file.analyze_emails_with_llm(emails)
+
+        self.assertIn("Executive Summary", result)
+        self.assertEqual(calls, ["https://backup.example/v1"])
+
+    def test_missing_primary_and_backup1_skips_to_backup2(self):
+        import qclaw_mail_file
+
+        emails = [{
+            "subject": "s",
+            "from_name": "n",
+            "from": "a@example.com",
+            "date": "2026-03-16 00:00:00+08:00",
+            "body": "b",
+        }]
+        calls = []
+
+        def fake_load():
+            qclaw_mail_file.LLM_BACKUP_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP_CONFIG.update({
+                "api_key": "",
+                "base_url": "https://backup1.example/v1",
+                "model": "backup1-model",
+            })
+            qclaw_mail_file.LLM_BACKUP2_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP2_CONFIG.update({
+                "api_key": "backup2-key",
+                "base_url": "https://backup2.example/v1",
+                "model": "gpt-5.4",
+                "supports_vision": True,
+                "reasoning_effort": "medium",
+            })
+            return {
+                "api_key": "",
+                "base_url": "https://primary.example/v1",
+                "model": "kimi-k2.5",
+                "supports_vision": True,
+            }
+
+        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None):
+            calls.append(api_config["base_url"])
+            return """{
+              "executive_summary": {"market_background": "背景", "key_signals": ["信号"]},
+              "core_events": [],
+              "local_news": [],
+              "peripheral_intelligence": {"mapped_events": [], "cross_market_signals": []},
+              "actionable_ideas": {"short_term": [], "medium_term": [], "catalysts": [], "bottom_line": "结论"}
+            }"""
+
+        with patch.object(qclaw_mail_file, "load_llm_config", side_effect=fake_load):
+            with patch.object(qclaw_mail_file, "call_llm_api", side_effect=fake_call):
+                result = qclaw_mail_file.analyze_emails_with_llm(emails)
+
+        self.assertIn("Executive Summary", result)
+        self.assertEqual(calls, ["https://backup2.example/v1"])
 
     def test_analyze_sanitizes_inline_image_payloads(self):
         import qclaw_mail_file
@@ -408,11 +531,11 @@ class SmokeTests(unittest.TestCase):
 
         with patch.object(
             qclaw_mail_file,
-            "load_kimi_config",
+            "load_llm_config",
             return_value={"api_key": "primary-key", "base_url": "https://primary.example/v1", "model": "primary-model"},
         ):
-            with patch.object(qclaw_mail_file, "call_kimi_api_with_retries", side_effect=lambda *args, **kwargs: fake_call(*args[:3])):
-                result = qclaw_mail_file.analyze_emails_with_kimi(emails, "spec")
+            with patch.object(qclaw_mail_file, "call_llm_api_with_retries", side_effect=lambda *args, **kwargs: fake_call(*args[:3])):
+                result = qclaw_mail_file.analyze_emails_with_llm(emails)
 
         self.assertIn("Executive Summary", result)
         self.assertIn("[内嵌图片已省略", prompts["user_prompt"])
@@ -486,7 +609,7 @@ class SmokeTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 2)
 
-    def test_call_kimi_api_sends_multimodal_payload(self):
+    def test_call_llm_api_sends_multimodal_payload(self):
         import qclaw_mail_file
 
         fake_resp = Mock()
@@ -496,7 +619,7 @@ class SmokeTests(unittest.TestCase):
         fake_resp.raise_for_status.return_value = None
 
         with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
-            result = qclaw_mail_file.call_kimi_api(
+            result = qclaw_mail_file.call_llm_api(
                 {"api_key": "k", "base_url": "https://api.moonshot.cn/v1", "model": "kimi-k2.5"},
                 "system",
                 "user prompt",
@@ -512,6 +635,35 @@ class SmokeTests(unittest.TestCase):
         self.assertIsInstance(messages[1]["content"], list)
         self.assertEqual(messages[1]["content"][0], {"type": "text", "text": "user prompt"})
         self.assertEqual(messages[1]["content"][2]["type"], "image_url")
+
+    def test_call_llm_api_uses_openai_gpt5_chat_options(self):
+        import qclaw_mail_file
+
+        fake_resp = Mock()
+        fake_resp.json.return_value = {
+            "choices": [{"message": {"content": "{\"ok\": true}"}}]
+        }
+        fake_resp.raise_for_status.return_value = None
+
+        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+            qclaw_mail_file.call_llm_api(
+                {
+                    "api_key": "k",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-5.4",
+                    "supports_vision": True,
+                    "reasoning_effort": "medium",
+                },
+                "system",
+                "user prompt",
+            )
+
+        _, kwargs = post.call_args
+        payload = kwargs["json"]
+        self.assertEqual(payload["max_completion_tokens"], qclaw_mail_file.MAX_COMPLETION_TOKENS)
+        self.assertEqual(payload["reasoning_effort"], "medium")
+        self.assertNotIn("max_tokens", payload)
+        self.assertNotIn("temperature", payload)
 
     def test_split_emails_for_analysis_when_context_too_long(self):
         import qclaw_mail_file
@@ -557,6 +709,40 @@ class SmokeTests(unittest.TestCase):
         )
 
         self.assertIn("Source: MS + JPM", formatted)
+
+    def test_save_report_returns_stable_filename_and_keeps_timestamped_archive(self):
+        import qclaw_mail_file
+
+        html = "<html><head><title>x</title></head><body><h1>AI Morning Brief | 2026-03-17</h1><p>正文</p></body></html>"
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(qclaw_mail_file, "BASE_DIR", td):
+                report_file = qclaw_mail_file.save_report(html)
+                self.assertIsNotNone(report_file)
+                self.assertTrue(report_file.endswith(".html"))
+
+                stable_files = [
+                    name for name in os.listdir(td)
+                    if name.startswith("AI_Morning_Brief_") and name.endswith(".html")
+                ]
+
+                stable_path = report_file
+                self.assertTrue(os.path.exists(stable_path))
+                self.assertRegex(os.path.basename(stable_path), r"^AI_Morning_Brief_\d{8}\.html$")
+
+                timestamped_paths = [
+                    os.path.join(td, name)
+                    for name in stable_files
+                    if name != os.path.basename(stable_path)
+                ]
+                self.assertEqual(len(timestamped_paths), 1)
+                self.assertRegex(
+                    os.path.basename(timestamped_paths[0]),
+                    r"^AI_Morning_Brief_\d{8}_\d{6}\.html$",
+                )
+
+                latest = qclaw_mail_file.check_for_report()
+                self.assertEqual(latest, stable_path)
 
     def test_format_html_report_removes_existing_model_meta_block(self):
         import qclaw_mail_file
@@ -698,6 +884,17 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("<h3>NVDA GTC 前瞻</h3>", formatted)
         self.assertNotIn('<h3><span class="highlight">', formatted)
 
+    def test_format_html_report_strips_emojis_locally(self):
+        import qclaw_mail_file
+
+        html = "<html><body><h2>Executive Summary 🔥</h2><p>市场当前🙂主要围绕 AI 主线展开。</p></body></html>"
+        formatted = qclaw_mail_file.format_html_report(html)
+
+        self.assertIn("<h2>Executive Summary </h2>", formatted)
+        self.assertIn("<p>市场当前主要围绕 AI 主线展开。</p>", formatted)
+        self.assertNotIn("🔥", formatted)
+        self.assertNotIn("🙂", formatted)
+
     def test_single_stage_prompt_enforces_attribution(self):
         import qclaw_mail_file
 
@@ -746,16 +943,23 @@ class SmokeTests(unittest.TestCase):
               }
             }"""
 
-        with patch.object(qclaw_mail_file, "generate_with_kimi", side_effect=fake_generate):
-            result = qclaw_mail_file.analyze_emails_with_kimi(emails, "spec")
+        with patch.object(qclaw_mail_file, "generate_with_llm", side_effect=fake_generate):
+            result = qclaw_mail_file.analyze_emails_with_llm(emails)
 
         self.assertIn("NVDA / MU 推理链路", result)
         self.assertIn("Shawn Kim says", prompts["user"])
+        self.assertIn("你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师", prompts["system"])
+        self.assertIn("你的职责不是机械复述邮件，而是帮助分析师快速看清", prompts["system"])
+        self.assertIn("市场大背景优先写宏观主线", prompts["system"])
+        self.assertIn("语言要像盘前晨报，不像长报告", prompts["system"])
         self.assertIn("不能把外部引述、媒体报道、市场传闻误写成发件机构 house view", prompts["system"])
-        self.assertIn("不要把第三方被引述的观点错误写成发件机构观点", prompts["user"])
-        self.assertIn("功能上线、版本升级、界面变化、一般性产品更新", prompts["user"])
-        self.assertIn("Executive Summary 固定只服务于市场背景和关键信号", prompts["system"])
+        self.assertNotIn("额外参考规范", prompts["system"])
+        self.assertNotIn("不要把第三方被引述的观点错误写成发件机构观点", prompts["user"])
+        self.assertNotIn("功能上线、版本升级、界面变化、一般性产品更新", prompts["user"])
+        self.assertIn("`Executive Summary` 下面固定只放 `市场大背景` 和 `关键信号`", prompts["system"])
         self.assertIn("核心事实每条尽量一句话", prompts["system"])
+        self.assertIn("关键信号、投资启示、Bottom Line 都优先写成短句", prompts["system"])
+        self.assertIn("只返回合法 JSON，不要补充解释", prompts["user"])
         self.assertIn('"executive_summary"', prompts["system"])
         self.assertIn('"core_events"', prompts["system"])
         self.assertIn('"local_news"', prompts["system"])
@@ -792,14 +996,16 @@ class SmokeTests(unittest.TestCase):
             "_analysis_body_len": 88,
         }]
 
-        with patch.object(qclaw_mail_file, "generate_with_kimi", side_effect=fake_generate):
-            parsed = qclaw_mail_file.analyze_batch_summary_with_kimi(emails, total_email_count=1, batch_index=1, batch_total=1)
+        with patch.object(qclaw_mail_file, "generate_with_llm", side_effect=fake_generate):
+            parsed = qclaw_mail_file.analyze_batch_summary_with_llm(emails, total_email_count=1, batch_index=1, batch_total=1)
 
         self.assertEqual(parsed["batch_index"], 1)
+        self.assertIn("你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师", prompts["system"])
         self.assertIn('"fact_subject"', prompts["system"])
         self.assertIn('"opinion_subject"', prompts["system"])
         self.assertIn('"source_evidence"', prompts["system"])
-        self.assertIn("不要把引述来的第三方观点升级成发件机构观点", prompts["user"])
+        self.assertIn("不能把转述者默认当作观点提出者", prompts["system"])
+        self.assertIn("只返回合法 JSON", prompts["user"])
 
     def test_merge_prompt_discourages_trivial_updates(self):
         import qclaw_mail_file
@@ -831,18 +1037,23 @@ class SmokeTests(unittest.TestCase):
               }
             }"""
 
-        with patch.object(qclaw_mail_file, "generate_with_kimi", side_effect=fake_generate):
-            qclaw_mail_file.merge_batch_summaries_with_kimi(
+        with patch.object(qclaw_mail_file, "generate_with_llm", side_effect=fake_generate):
+            qclaw_mail_file.merge_batch_summaries_with_llm(
                 [{"batch_index": 1, "batch_total": 1, "email_ids": [1], "topics": []}],
-                "spec",
                 total_email_count=1,
             )
 
+        self.assertIn("你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师", prompts["system"])
+        self.assertIn("不要把 Actionable Ideas 写成待办清单", prompts["system"])
+        self.assertIn("Actionable Ideas 要短、狠、可执行", prompts["system"])
+        self.assertIn("Local News 不是次要垃圾桶", prompts["system"])
         self.assertIn("功能小升级", prompts["system"])
-        self.assertIn("trivial 功能升级", prompts["user"])
-        self.assertIn("市场背景", prompts["system"])
+        self.assertIn("trivial 变化默认忽略或显著降权", prompts["system"])
+        self.assertIn("市场大背景", prompts["system"])
         self.assertIn("关键信号", prompts["system"])
-        self.assertIn("核心事实是否仍然过长、过啰嗦", prompts["user"])
+        self.assertIn("核心事实要尽量短", prompts["system"])
+        self.assertIn("如果一句话已经表达出判断，就不要再追加第二句做弱信息量复述", prompts["system"])
+        self.assertIn("只返回合法 JSON", prompts["user"])
         self.assertIn("Actionable Ideas` 不是剩余信息区", prompts["system"])
 
     def test_parse_report_payload_json_normalizes_schema(self):
@@ -960,7 +1171,7 @@ class SmokeTests(unittest.TestCase):
 
         self.assertEqual(
             [item["headline"] for item in payload["core_events"]],
-            ["最高优先级主题", "高覆盖主题", "同rank但覆盖更低的主题"],
+            ["高覆盖主题", "最高优先级主题", "同rank但覆盖更低的主题"],
         )
 
     def test_parse_report_payload_json_sorts_actionable_ideas_and_catalysts(self):
@@ -1001,6 +1212,134 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(
             [item["catalyst"] for item in payload["actionable_ideas"]["catalysts"]],
             ["高优先级催化", "低优先级催化"],
+        )
+
+    def test_parse_report_payload_json_preserves_local_news_model_order(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场波动提升",
+            "key_signals": ["排序测试"]
+          },
+          "local_news": [
+            {
+              "headline": "低覆盖但模型主观更高",
+              "priority_rank": 1,
+              "coverage_count": 1,
+              "global_score": 7.0,
+              "signal": "信号 A",
+              "importance": "重要性 A",
+              "action": "动作 A"
+            },
+            {
+              "headline": "高覆盖信号",
+              "priority_rank": 3,
+              "coverage_count": 3,
+              "global_score": 6.5,
+              "signal": "信号 B",
+              "importance": "重要性 B",
+              "action": "动作 B"
+            },
+            {
+              "headline": "同覆盖但分数更高",
+              "priority_rank": 2,
+              "coverage_count": 1,
+              "global_score": 8.0,
+              "signal": "信号 C",
+              "importance": "重要性 C",
+              "action": "动作 C"
+            }
+          ]
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+
+        self.assertEqual(
+            [item["headline"] for item in payload["local_news"]],
+            ["低覆盖但模型主观更高", "高覆盖信号", "同覆盖但分数更高"],
+        )
+
+    def test_parse_report_payload_json_derives_key_signals_from_core_events_first(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场波动提升",
+            "key_signals": ["模型原始信号A", "模型原始信号B"]
+          },
+          "core_events": [
+            {
+              "headline": "高覆盖核心主题",
+              "priority_rank": 3,
+              "coverage_count": 4,
+              "global_score": 8.5,
+              "core_facts": ["事实 A"]
+            },
+            {
+              "headline": "次高覆盖核心主题",
+              "priority_rank": 1,
+              "coverage_count": 2,
+              "global_score": 7.8,
+              "core_facts": ["事实 B"]
+            }
+          ],
+          "local_news": [
+            {
+              "headline": "特别值得关注的边缘信号",
+              "priority_rank": 1,
+              "coverage_count": 0,
+              "global_score": 8.2,
+              "signal": "信号 C",
+              "importance": "重要性 C",
+              "action": "动作 C"
+            }
+          ],
+          "peripheral_intelligence": {
+            "mapped_events": [],
+            "cross_market_signals": [
+              {
+                "headline": "普通跨市场信号",
+                "priority_rank": 3,
+                "coverage_count": 0,
+                "global_score": 6.0,
+                "bullets": ["信号 D"]
+              }
+            ]
+          }
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+
+        self.assertEqual(
+            payload["executive_summary"]["key_signals"][:3],
+            ["高覆盖核心主题", "次高覆盖核心主题", "特别值得关注的边缘信号"],
+        )
+        self.assertNotIn("普通跨市场信号", payload["executive_summary"]["key_signals"][:3])
+
+    def test_parse_report_payload_json_preserves_model_market_background(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场当前主要围绕 AI 竞赛节奏、广告恢复与消费季节性重估三条主线展开博弈。"
+          },
+          "core_events": [
+            {
+              "headline": "HBM 与推理链路仍是焦点",
+              "priority_rank": 1,
+              "coverage_count": 3,
+              "global_score": 8.5,
+              "core_facts": ["产业链继续围绕 HBM 供需与推理芯片节奏展开"]
+            }
+          ]
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+
+        self.assertEqual(
+            payload["executive_summary"]["market_background"],
+            "市场当前主要围绕 AI 竞赛节奏、广告恢复与消费季节性重估三条主线展开博弈。",
         )
 
     def test_parse_report_payload_json_links_actionable_items_to_core_events(self):
@@ -1236,7 +1575,8 @@ class SmokeTests(unittest.TestCase):
         )
 
         self.assertIn("<h2>Executive Summary</h2>", html)
-        self.assertIn("<strong>市场大背景:</strong> 市场背景 A", html)
+        self.assertIn("<strong>市场大背景:</strong>", html)
+        self.assertIn("市场背景 A", html)
         self.assertIn("<strong>关键信号:</strong>", html)
         self.assertIn("<h2>Key Coverage | 核心事件与市场观点</h2>", html)
         self.assertIn("<th>观点来源</th>", html)

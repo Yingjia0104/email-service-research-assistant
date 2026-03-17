@@ -53,21 +53,35 @@ BJT = pytz.timezone('Asia/Shanghai')
 # 邮件服务API
 EMAIL_API = "http://127.0.0.1:8877"
 
-# Kimi (Moonshot AI) API 配置
-KIMI_CONFIG = {
+# 主模型 API 配置（兼容 OpenAI / Moonshot 等 Chat Completions 风格接口）
+LLM_CONFIG = {
     "api_key": "",
     "base_url": "https://api.moonshot.cn/v1",
     "model": "kimi-k2.5",
     "supports_vision": True,
 }
 
-# 备用 API 配置（当前API余额不足时使用）
-KIMI_BACKUP_CONFIG = {
+# 备用 API 配置
+LLM_BACKUP_CONFIG = {
     "api_key": "",
     "base_url": "https://api.moonshot.cn/v1",
     "model": "kimi-k2.5",
     "supports_vision": True,
 }
+
+LLM_BACKUP2_CONFIG = {
+    "api_key": "",
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-5.4",
+    "supports_vision": True,
+    "reasoning_effort": "medium",
+}
+
+# 向后兼容旧的 Kimi 命名，避免本地脚本/临时调试代码立刻失效。
+KIMI_CONFIG = LLM_CONFIG
+KIMI_BACKUP_CONFIG = LLM_BACKUP_CONFIG
+KIMI_BACKUP2_CONFIG = LLM_BACKUP2_CONFIG
 
 MAX_EMAIL_BODY_CHARS = 12000
 MAX_PROMPT_BODY_CHARS = 40000
@@ -76,6 +90,25 @@ BATCH_SPLIT_TRIGGER_CHARS = 26000
 MIN_TRUNCATION_CONTENT_CHARS = 40
 MAX_MULTIMODAL_IMAGES = 6
 MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
+
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F000-\U0001F02F"
+    "\U0001F0A0-\U0001F0FF"
+    "\U0001F100-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U00002600-\U000026FF"
+    "\uFE0F"
+    "\u20E3"
+    "]+",
+    flags=re.UNICODE,
+)
 
 SIGNATURE_LINE_MARKERS = (
     "best regards",
@@ -280,55 +313,91 @@ def load_config():
         return yaml.safe_load(f)
 
 
-def load_kimi_config():
-    """加载 Kimi API 配置"""
+def load_llm_config():
+    """加载主/备 LLM API 配置。兼容新的 llm.* 键和旧的 kimi.* 键。"""
     config = load_config()
-    kimi_cfg = config.get("kimi", {})
+    llm_cfg = config.get("llm") or config.get("kimi", {})
 
-    KIMI_CONFIG["api_key"] = kimi_cfg.get("api_key", "")
-    KIMI_CONFIG["base_url"] = kimi_cfg.get("base_url", "https://api.moonshot.cn/v1")
-    KIMI_CONFIG["model"] = kimi_cfg.get("model", "kimi-k2.5")
-    if "supports_vision" in kimi_cfg:
-        KIMI_CONFIG["supports_vision"] = bool(kimi_cfg.get("supports_vision"))
+    primary_key_env = str(llm_cfg.get("api_key_env", LLM_CONFIG.get("api_key_env", "")) or "").strip()
+    primary_api_key = str(llm_cfg.get("api_key", "") or "").strip()
+    if not primary_api_key and primary_key_env:
+        primary_api_key = str(os.getenv(primary_key_env, "") or "").strip()
+
+    LLM_CONFIG["api_key"] = primary_api_key
+    if primary_key_env:
+        LLM_CONFIG["api_key_env"] = primary_key_env
     else:
-        KIMI_CONFIG["supports_vision"] = any(
-            token in KIMI_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl")
+        LLM_CONFIG.pop("api_key_env", None)
+    LLM_CONFIG["base_url"] = llm_cfg.get("base_url", "https://api.moonshot.cn/v1")
+    LLM_CONFIG["model"] = llm_cfg.get("model", "kimi-k2.5")
+    reasoning_effort = str(llm_cfg.get("reasoning_effort", LLM_CONFIG.get("reasoning_effort", "")) or "").strip()
+    if reasoning_effort:
+        LLM_CONFIG["reasoning_effort"] = reasoning_effort
+    else:
+        LLM_CONFIG.pop("reasoning_effort", None)
+    if "supports_vision" in llm_cfg:
+        LLM_CONFIG["supports_vision"] = bool(llm_cfg.get("supports_vision"))
+    else:
+        LLM_CONFIG["supports_vision"] = any(
+            token in LLM_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
         )
 
     # 加载备用 API 配置
-    backup_cfg = config.get("kimi_backup", {})
-    KIMI_BACKUP_CONFIG["api_key"] = backup_cfg.get("api_key", "")
-    KIMI_BACKUP_CONFIG["base_url"] = backup_cfg.get("base_url", "https://api.moonshot.cn/v1")
-    KIMI_BACKUP_CONFIG["model"] = backup_cfg.get("model", "kimi-k2.5")
-    if "supports_vision" in backup_cfg:
-        KIMI_BACKUP_CONFIG["supports_vision"] = bool(backup_cfg.get("supports_vision"))
+    backup_cfg = config.get("llm_backup") or config.get("kimi_backup", {})
+    backup_key_env = str(backup_cfg.get("api_key_env", LLM_BACKUP_CONFIG.get("api_key_env", "")) or "").strip()
+    backup_api_key = str(backup_cfg.get("api_key", "") or "").strip()
+    if not backup_api_key and backup_key_env:
+        backup_api_key = str(os.getenv(backup_key_env, "") or "").strip()
+
+    LLM_BACKUP_CONFIG["api_key"] = backup_api_key
+    if backup_key_env:
+        LLM_BACKUP_CONFIG["api_key_env"] = backup_key_env
     else:
-        KIMI_BACKUP_CONFIG["supports_vision"] = any(
-            token in KIMI_BACKUP_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl")
+        LLM_BACKUP_CONFIG.pop("api_key_env", None)
+    LLM_BACKUP_CONFIG["base_url"] = backup_cfg.get("base_url", "https://api.moonshot.cn/v1")
+    LLM_BACKUP_CONFIG["model"] = backup_cfg.get("model", "kimi-k2.5")
+    backup_reasoning_effort = str(backup_cfg.get("reasoning_effort", LLM_BACKUP_CONFIG.get("reasoning_effort", "")) or "").strip()
+    if backup_reasoning_effort:
+        LLM_BACKUP_CONFIG["reasoning_effort"] = backup_reasoning_effort
+    else:
+        LLM_BACKUP_CONFIG.pop("reasoning_effort", None)
+    if "supports_vision" in backup_cfg:
+        LLM_BACKUP_CONFIG["supports_vision"] = bool(backup_cfg.get("supports_vision"))
+    else:
+        LLM_BACKUP_CONFIG["supports_vision"] = any(
+            token in LLM_BACKUP_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
         )
 
-    return KIMI_CONFIG
+    backup2_cfg = config.get("llm_backup2") or config.get("kimi_backup2", {})
+    backup2_key_env = str(backup2_cfg.get("api_key_env", LLM_BACKUP2_CONFIG.get("api_key_env", "")) or "").strip()
+    backup2_api_key = str(backup2_cfg.get("api_key", "") or "").strip()
+    if not backup2_api_key and backup2_key_env:
+        backup2_api_key = str(os.getenv(backup2_key_env, "") or "").strip()
+
+    LLM_BACKUP2_CONFIG["api_key"] = backup2_api_key
+    if backup2_key_env:
+        LLM_BACKUP2_CONFIG["api_key_env"] = backup2_key_env
+    else:
+        LLM_BACKUP2_CONFIG.pop("api_key_env", None)
+    LLM_BACKUP2_CONFIG["base_url"] = backup2_cfg.get("base_url", "https://api.openai.com/v1")
+    LLM_BACKUP2_CONFIG["model"] = backup2_cfg.get("model", "gpt-5.4")
+    backup2_reasoning_effort = str(backup2_cfg.get("reasoning_effort", LLM_BACKUP2_CONFIG.get("reasoning_effort", "")) or "").strip()
+    if backup2_reasoning_effort:
+        LLM_BACKUP2_CONFIG["reasoning_effort"] = backup2_reasoning_effort
+    else:
+        LLM_BACKUP2_CONFIG.pop("reasoning_effort", None)
+    if "supports_vision" in backup2_cfg:
+        LLM_BACKUP2_CONFIG["supports_vision"] = bool(backup2_cfg.get("supports_vision"))
+    else:
+        LLM_BACKUP2_CONFIG["supports_vision"] = any(
+            token in LLM_BACKUP2_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
+        )
+
+    return LLM_CONFIG
 
 
-def load_format_spec():
-    """加载 HF Morning Brief 格式规范"""
-    format_spec_file = os.path.join(BASE_DIR, "HF_Morning_Brief_格式规范.md")
-    if os.path.exists(format_spec_file):
-        with open(format_spec_file, 'r', encoding='utf-8') as f:
-            return f.read()
-    return ""
-
-
-def build_format_spec_guidance(format_spec: str, max_chars: int = 2200) -> str:
-    """把格式规范压缩成适合 prompt 的参考块。"""
-    raw = (format_spec or "").strip()
-    if not raw:
-        return ""
-    compact = re.sub(r"\n{3,}", "\n\n", raw)
-    compact = compact.strip()
-    if len(compact) > max_chars:
-        compact = compact[:max_chars].rstrip() + "\n..."
-    return compact
+# 向后兼容旧函数名。
+load_kimi_config = load_llm_config
 
 
 def try_acquire_analysis_lock():
@@ -366,7 +435,19 @@ def model_supports_vision(api_config: Dict[str, Any]) -> bool:
         return bool(api_config.get("supports_vision"))
 
     model_name = str((api_config or {}).get("model", "")).lower()
-    return any(token in model_name for token in ("thinking-preview", "vision", "vl"))
+    return any(token in model_name for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5"))
+
+
+def is_openai_chat_api(api_config: Dict[str, Any]) -> bool:
+    """判断当前配置是否指向 OpenAI 兼容官方入口。"""
+    base_url = str((api_config or {}).get("base_url", "") or "").lower()
+    return "api.openai.com" in base_url
+
+
+def is_openai_gpt5_family(api_config: Dict[str, Any]) -> bool:
+    """判断是否为 OpenAI GPT-5 系列模型。"""
+    model_name = str((api_config or {}).get("model", "") or "").lower()
+    return model_name.startswith("gpt-5")
 
 
 def parse_attachment_list(raw_attachments: Any) -> List[Dict]:
@@ -636,87 +717,92 @@ def build_emails_text(emails: List[Dict], total_email_count: int, total_body_bud
     return "\n".join(emails_summary)
 
 
-def generate_with_kimi(system_prompt: str, user_prompt: str, emails: Optional[List[Dict]] = None) -> str:
+def generate_with_llm(system_prompt: str, user_prompt: str, emails: Optional[List[Dict]] = None) -> str:
     """统一封装主/备模型的短重试与切换逻辑。"""
-    kimi_cfg = load_kimi_config()
-    api_key = kimi_cfg.get("api_key", "")
-
-    if not api_key:
-        logger.error("❌ 未配置 Kimi API Key，请在 config.yaml 中配置 kimi.api_key")
-        raise Exception("missing kimi api key")
-
-    primary_multimodal_blocks = build_multimodal_user_blocks(emails or [], kimi_cfg)
+    llm_cfg = load_llm_config()
+    api_key = llm_cfg.get("api_key", "")
+    primary_multimodal_blocks = build_multimodal_user_blocks(emails or [], llm_cfg)
     if primary_multimodal_blocks:
         logger.info(f"🖼️ 主模型将接收 {len(primary_multimodal_blocks) // 2} 张图片附件进行多模态分析")
 
-    result = call_kimi_api_with_retries(
-        kimi_cfg,
-        system_prompt,
-        user_prompt,
-        label="主API",
-        max_retries=1,
-        delay=5.0,
-        backoff=2.0,
-        user_content_blocks=primary_multimodal_blocks,
-    )
-
-    if result:
-        return result
-
-    if primary_multimodal_blocks:
-        logger.warning("⚠️ 主模型多模态请求失败，降级为纯文本重试")
-        result = call_kimi_api_with_retries(
-            kimi_cfg,
+    if api_key:
+        result = call_llm_api_with_retries(
+            llm_cfg,
             system_prompt,
             user_prompt,
-            label="主API-文本降级",
+            label="主API",
             max_retries=1,
-            delay=4.0,
+            delay=5.0,
             backoff=2.0,
-            user_content_blocks=None,
+            user_content_blocks=primary_multimodal_blocks,
         )
+
         if result:
-            logger.info("✅ 主模型文本降级成功")
             return result
 
-    backup_cfg = KIMI_BACKUP_CONFIG
-    if backup_cfg.get("api_key"):
-        logger.warning(f"⚠️ 主 API 不可用，切换备用 API: {backup_cfg['base_url']} (模型: {backup_cfg['model']})")
+        if primary_multimodal_blocks:
+            logger.warning("⚠️ 主模型多模态请求失败，降级为纯文本重试")
+            result = call_llm_api_with_retries(
+                llm_cfg,
+                system_prompt,
+                user_prompt,
+                label="主API-文本降级",
+                max_retries=1,
+                delay=4.0,
+                backoff=2.0,
+                user_content_blocks=None,
+            )
+            if result:
+                logger.info("✅ 主模型文本降级成功")
+                return result
+    else:
+        key_hint = llm_cfg.get("api_key_env") or "llm.api_key"
+        logger.warning(f"⚠️ 主模型未配置可用 API Key，跳过主模型并尝试备用模型（期望来源: {key_hint}）")
+
+    backup_chain = [
+        ("备用API", LLM_BACKUP_CONFIG),
+        ("备用API2", LLM_BACKUP2_CONFIG),
+    ]
+    for label, backup_cfg in backup_chain:
+        if not backup_cfg.get("api_key"):
+            continue
+
+        logger.warning(f"⚠️ 主 API 不可用，切换{label}: {backup_cfg['base_url']} (模型: {backup_cfg['model']})")
         backup_multimodal_blocks = build_multimodal_user_blocks(emails or [], backup_cfg)
         if primary_multimodal_blocks and not backup_multimodal_blocks:
-            logger.warning("⚠️ 备用模型当前未启用多模态支持，图片附件将仅保留正文元数据提示")
-        result = call_kimi_api_with_retries(
+            logger.warning(f"⚠️ {label} 当前未启用多模态支持，图片附件将仅保留正文元数据提示")
+        result = call_llm_api_with_retries(
             backup_cfg,
             system_prompt,
             user_prompt,
-            label="备用API",
+            label=label,
             max_retries=1,
             delay=3.0,
             backoff=2.0,
             user_content_blocks=backup_multimodal_blocks,
         )
         if result:
-            logger.info("✅ 备用 API 分析完成")
+            logger.info(f"✅ {label} 分析完成")
             return result
 
         if backup_multimodal_blocks:
-            logger.warning("⚠️ 备用模型多模态请求失败，降级为纯文本重试")
-            result = call_kimi_api_with_retries(
+            logger.warning(f"⚠️ {label} 多模态请求失败，降级为纯文本重试")
+            result = call_llm_api_with_retries(
                 backup_cfg,
                 system_prompt,
                 user_prompt,
-                label="备用API-文本降级",
+                label=f"{label}-文本降级",
                 max_retries=1,
                 delay=3.0,
                 backoff=2.0,
                 user_content_blocks=None,
             )
             if result:
-                logger.info("✅ 备用模型文本降级成功")
+                logger.info(f"✅ {label} 文本降级成功")
                 return result
 
-    logger.error("❌ 主 API 与备用 API 均失败")
-    raise Exception("Kimi API error: 主 API 和备用 API 均失败")
+    logger.error("❌ 主 API 与所有备用 API 均失败")
+    raise Exception("LLM API error: 主 API 和所有备用 API 均失败")
 
 
 def extract_json_block(text: str) -> str:
@@ -790,7 +876,7 @@ def repair_report_payload_json(raw_text: str) -> Dict[str, Any]:
 {raw_text}
 ```"""
 
-    repaired = generate_with_kimi(repair_system_prompt, repair_user_prompt, emails=None)
+    repaired = generate_with_llm(repair_system_prompt, repair_user_prompt, emails=None)
     payload = load_json_dict_with_fallbacks(repaired)
     logger.info("✅ 模型返回的损坏 JSON 已通过修复流程恢复")
     return payload
@@ -991,16 +1077,73 @@ def coerce_float(value: Any, default: float = 0.0) -> float:
 
 
 def build_priority_sort_key(item: Dict[str, Any]) -> tuple:
-    """统一的优先级排序键：先按显式 rank，再按覆盖度，再按全局分数。"""
+    """统一的优先级排序键：先按覆盖度，再按全局分数，最后才参考模型显式 rank。"""
+    # TODO(coverage-first): 当前默认更信任“被多少封邮件反复提到”的客观共识，
+    # 因此排序优先级是 coverage_count -> global_score -> priority_rank。
+    # 后续若完成更系统的人工标注 / 模型评测，并且允许分析师配置关注板块，
+    # 可重新评估是否让 Executive Summary / Key Coverage 对主观 priority_rank 或偏好权重更敏感。
     raw_rank = item.get("priority_rank")
     rank = coerce_int(raw_rank, 9999 if raw_rank in (None, "") else 9999)
     coverage = coerce_int(item.get("coverage_count"), 0)
     score = coerce_float(item.get("global_score"), 0.0)
-    return (rank, -coverage, -score)
+    return (-coverage, -score, rank)
 
 
 def sort_by_priority(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(items, key=build_priority_sort_key)
+
+
+def derive_executive_key_signals(
+    normalized_coverage: List[Dict[str, Any]],
+    normalized_local_news: List[Dict[str, Any]],
+    normalized_cross_market_signals: List[Dict[str, Any]],
+    model_key_signals: Any,
+    limit: int = 5,
+) -> List[str]:
+    """Executive Summary 的关键信号以 Key Coverage 为主，再少量吸收特别强的边缘/跨市场信号。"""
+
+    def add_signal(result: List[str], seen: set, text: str) -> None:
+        text = str(text or "").strip()
+        if not text:
+            return
+        key = re.sub(r"\s+", " ", text).strip().lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        result.append(text)
+
+    def is_standout(item: Dict[str, Any]) -> bool:
+        coverage = coerce_int(item.get("coverage_count"), 0)
+        score = coerce_float(item.get("global_score"), 0.0)
+        rank = coerce_int(item.get("priority_rank"), 9999)
+        return coverage >= 2 or score >= 8.0 or rank == 1
+
+    results: List[str] = []
+    seen = set()
+
+    for item in normalized_coverage:
+        if len(results) >= limit:
+            break
+        add_signal(results, seen, item.get("headline"))
+
+    for item in normalized_local_news:
+        if len(results) >= limit:
+            break
+        if is_standout(item):
+            add_signal(results, seen, item.get("headline") or item.get("signal"))
+
+    for item in normalized_cross_market_signals:
+        if len(results) >= limit:
+            break
+        if is_standout(item):
+            add_signal(results, seen, item.get("headline"))
+
+    for item in normalize_string_list(model_key_signals, limit=limit):
+        if len(results) >= limit:
+            break
+        add_signal(results, seen, item)
+
+    return results[:limit]
 
 
 def normalize_core_event_link_refs(value: Any, limit: int = 5) -> List[str]:
@@ -1230,6 +1373,8 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized_local_news.append({
             "headline": headline,
             "priority_rank": coerce_int(item.get("priority_rank"), 9999),
+            "coverage_count": coerce_int(item.get("coverage_count"), 0),
+            "global_score": coerce_float(item.get("global_score"), 0.0),
             "signal": signal_text,
             "importance": importance_text,
             "action": action_text,
@@ -1258,10 +1403,8 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             ),
         })
 
-    normalized_local_news = sorted(
-        normalized_local_news,
-        key=lambda item: coerce_int(item.get("priority_rank"), 9999),
-    )[:6]
+    # Local News 保留模型输出顺序。这里不做本地排序，避免打乱模型对边缘信号的编排语义。
+    normalized_local_news = normalized_local_news[:6]
 
     peripheral = payload.get("peripheral_intelligence") or {}
     if not isinstance(peripheral, dict):
@@ -1299,6 +1442,8 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized_cross_market_signals.append({
             "headline": headline,
             "priority_rank": coerce_int(item.get("priority_rank"), 9999),
+            "coverage_count": coerce_int(item.get("coverage_count"), 0),
+            "global_score": coerce_float(item.get("global_score"), 0.0),
             "bullets": bullets,
             "bullet_highlight_phrases": merge_highlight_phrases(
                 item.get("bullet_highlight_phrases"),
@@ -1308,10 +1453,8 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             ),
         })
 
-    normalized_cross_market_signals = sorted(
-        normalized_cross_market_signals,
-        key=lambda item: coerce_int(item.get("priority_rank"), 9999),
-    )[:5]
+    # Peripheral / cross_market_signals 同样保留模型输出顺序，不做本地重排。
+    normalized_cross_market_signals = normalized_cross_market_signals[:5]
 
     actionable = payload.get("actionable_ideas") or {}
     if not isinstance(actionable, dict):
@@ -1395,13 +1538,18 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         executive.get("market_background") or executive.get("background"),
         limit=4,
     )
+    derived_key_signals = derive_executive_key_signals(
+        normalized_coverage,
+        normalized_local_news,
+        normalized_cross_market_signals,
+        executive.get("key_signals") or executive.get("signals"),
+        limit=5,
+    )
+
     normalized = {
         "executive_summary": {
             "market_background": "；".join(market_background_items),
-            "key_signals": normalize_string_list(
-                executive.get("key_signals") or executive.get("signals"),
-                limit=5,
-            ),
+            "key_signals": derived_key_signals,
         },
         "core_events": normalized_coverage,
         "local_news": normalized_local_news,
@@ -1416,6 +1564,10 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "bottom_line": str(actionable.get("bottom_line") or payload.get("bottom_line") or "").strip(),
         },
     }
+
+    # TODO(analyst-preferences): Executive Summary 的关键信号目前仍主要依赖模型给出的顺序。
+    # 如果后续引入“分析师关注板块 / watchlist”配置，应优先只作用于 Executive Summary 和 Key Coverage，
+    # 不要影响 Local News / Peripheral / Actionable 的默认客观排序。
 
     if not normalized["executive_summary"]["market_background"]:
         normalized["executive_summary"]["market_background"] = "当日邮件的共同背景尚不充分，建议结合盘前行情一并解读。"
@@ -1466,15 +1618,19 @@ def get_report_prompt_governance() -> str:
         "优先做内容筛选和语义归因，再做摘要表达。",
         "结构稳定优先于文采，宁可朴素也不要漂移。",
         "图片、正文、附件文本需要在同一判断框架下联合理解。",
+        "默认先压缩再表达：能少写一句就不要多写一句，能删除的解释就不要保留。",
     ]
     bottom_lines = [
         "不能把外部引述、媒体报道、市场传闻误写成发件机构 house view。",
         "不能把普通功能小升级、版本小更新、一般性运营通知硬塞进核心版面。",
         "不能把观点判断、推测或带 says / suggests / reportedly 色彩的内容直接写成核心事实。",
+        "不能为了显得完整而重复同一个逻辑，不能把一句话能说清的内容扩成一段。",
     ]
     reminders = [
-        "Executive Summary 固定只服务于市场背景和关键信号，不写散乱长段。",
-        "核心事实每条尽量一句话；投资启示和为什么重要要短而硬。",
+        "核心事实每条尽量一句话；能短就不要写成长句。",
+        "关键信号、投资启示、Bottom Line 都优先写成短句，避免背景解释和同义反复。",
+        "如果一句话已经表达出判断，就不要再追加第二句做弱信息量复述。",
+        "来源展示优先使用正文和主题里可识别的真实机构标签，如 MS、JPM。",
         "版式由本地固定模板渲染，模型只需要把内容填进正确槽位。",
     ]
     return "\n\n".join(
@@ -1486,13 +1642,45 @@ def get_report_prompt_governance() -> str:
     )
 
 
+def get_hf_role_guidance() -> str:
+    identity = [
+        "你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师。",
+        "你的输入是已经筛选进系统的高价值卖方邮件、图表、传闻和渠道信息。",
+        "你的职责不是机械复述邮件，而是帮助分析师快速看清：今天这些重点板块里最集中的关注点是什么，市场对这些主题的主流态度和 thesis 是什么，哪些信息最可能影响预期修正和交易决策。",
+    ]
+    editorial_style = [
+        "你的读者已经知道大部分基础事实，你的价值在于提炼主线、统一归因、压缩噪音，并把最值得进入晨会讨论的内容放到最前面。",
+        "首页第一屏要像成熟的基金晨报：先给背景，再给关键信号，不要像券商邮件拼贴。",
+        "市场大背景优先写宏观主线；如果宏观不强，也至少要写成行业主线之间如何展开博弈。",
+        "核心区优先保留共识最强、可交易性最强、最可能影响预期修正的主题。",
+        "语言要像盘前晨报，不像长报告：句子尽量短，解释尽量少，避免把一个判断拆成三句来写。",
+        "如果一个点已经能被一句话讲清，就不要再补背景句、同义句和修饰句。",
+    ]
+    judgment_style = [
+        "对谁真正提出观点保持高度敏感；发件机构不自动拥有正文里的所有观点，外部人物、媒体、管理层、市场传闻必须保留真实主语。",
+        "默认先看哪些主题被重复提到、哪些判断正在形成共识，再决定排序和首页信号。",
+        "不要为了填版面硬塞 trivial 更新、普通功能升级或没有交易含义的边角信息。",
+        "不要把 Actionable Ideas 写成待办清单；它更像投资委员会会看的交易想法与催化清单。",
+        "Actionable Ideas 要短、狠、可执行；优先保留最核心的对象、逻辑和催化，不要写成解释型小作文。",
+        "Local News 不是次要垃圾桶，而是捕捉暂时不属于核心覆盖、但可能预示预期变化或相对收益机会的边缘信号。",
+        "Peripheral Intelligence 需要把非核心公司事件、跨市场变化和外围信息映射回当前最重要的投资主线。",
+    ]
+    return "\n\n".join(
+        [
+            build_prompt_category_block("角色", identity),
+            build_prompt_category_block("写法", editorial_style),
+            build_prompt_category_block("判断", judgment_style),
+        ]
+    )
+
+
 def get_fixed_report_schema_prompt() -> str:
     return f"""## 固定模板槽位
 你必须输出合法 JSON，字段结构如下：
 {{
   "executive_summary": {{
-    "market_background": "1段，概括市场大背景",
-    "key_signals": ["3-5条，提炼当日最重要信号"]
+    "market_background": "1段，概括市场大背景，优先1-2句",
+    "key_signals": ["3-5条，提炼当日最重要信号；每条尽量短，不要写成长句"]
   }},
   "core_events": [
     {{
@@ -1511,7 +1699,7 @@ def get_fixed_report_schema_prompt() -> str:
           "thesis_highlight_phrases": ["这一行核心论点里最值得高亮的1-3个短语，可选"]
         }}
       ],
-      "action": "投资启示，1-2句",
+      "action": "投资启示，优先1句，最多2句",
       "highlight_phrases": ["本主题最该高亮的1-4个短语，可选"],
       "attribution_note": "如有外部引述或传闻，明确说明真实主语；没有可留空字符串",
       "source_evidence": ["保留最关键的原文依据，最多3条"]
@@ -1521,9 +1709,9 @@ def get_fixed_report_schema_prompt() -> str:
     {{
       "headline": "容易被忽略的信号标题",
       "priority_rank": 1,
-      "signal": "发生了什么",
-      "importance": "为什么重要",
-      "action": "怎么交易/如何跟踪",
+        "signal": "发生了什么，优先短句",
+        "importance": "为什么重要，优先1句",
+        "action": "怎么交易/如何跟踪，优先1句",
       "highlight_phrases": ["可选：这一条里最该高亮的短语"]
     }}
   ],
@@ -1547,7 +1735,7 @@ def get_fixed_report_schema_prompt() -> str:
   "actionable_ideas": {{
     "short_term": [
       {{
-        "idea": "短期(1-5天)交易想法",
+        "idea": "短期(1-5天)交易想法，优先1句，不要写成长段解释",
         "priority_rank": 1,
         "coverage_count": 3,
         "global_score": 9.0,
@@ -1557,7 +1745,7 @@ def get_fixed_report_schema_prompt() -> str:
     ],
     "medium_term": [
       {{
-        "idea": "中期(1-4周)交易想法",
+        "idea": "中期(1-4周)交易想法，优先1句，不要写成长段解释",
         "priority_rank": 1,
         "coverage_count": 2,
         "global_score": 8.5,
@@ -1577,7 +1765,7 @@ def get_fixed_report_schema_prompt() -> str:
         "linked_core_event_headlines": ["引用 `core_events.headline` 中的标题，最多3个"]
       }}
     ],
-    "bottom_line": "1句总结"
+    "bottom_line": "1句总结，短而明确"
   }}
 }}
 
@@ -1802,11 +1990,13 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
     )
 
 
-def analyze_batch_summary_with_kimi(batch_emails: List[Dict], total_email_count: int, batch_index: int, batch_total: int) -> Dict:
+def analyze_batch_summary_with_llm(batch_emails: List[Dict], total_email_count: int, batch_index: int, batch_total: int) -> Dict:
     emails_text = build_emails_text(batch_emails, total_email_count, total_body_budget=MAX_PROMPT_BODY_CHARS // 2)
     batch_email_ids = ", ".join(str(email.get("_analysis_index")) for email in batch_emails)
 
     system_prompt = f"""你是一位卖方邮件研究助理。你当前的任务不是直接写最终晨报，而是先把一个子批次邮件压缩成便于二次合并的结构化 JSON 摘要。
+
+{get_hf_role_guidance()}
 
 ## 原则
 - 先区分事实、观点、传闻，再做摘要
@@ -1853,28 +2043,26 @@ def analyze_batch_summary_with_kimi(batch_emails: List[Dict], total_email_count:
 
     user_prompt = f"""请把下面这批邮件整理成结构化中间摘要，供后续二次合并。
 
+要求：
+- 使用简体中文
+- 只返回合法 JSON
+
 当前批次: {batch_index}/{batch_total}
 批次包含邮件编号: {batch_email_ids}
 
 邮件内容：
 {emails_text}
-
-请特别注意：
-- 识别每条判断的真实主语
-- 不要把引述来的第三方观点升级成发件机构观点
-- 不要把带有判断色彩的观点写进“核心事实”
 """
 
-    raw = generate_with_kimi(system_prompt, user_prompt, emails=batch_emails)
+    raw = generate_with_llm(system_prompt, user_prompt, emails=batch_emails)
     parsed = parse_batch_summary_json(raw)
     parsed["batch_index"] = batch_index
     parsed["batch_total"] = batch_total
     return parsed
 
 
-def merge_batch_summaries_with_kimi(
+def merge_batch_summaries_with_llm(
     batch_summaries: List[Dict],
-    format_spec: str,
     total_email_count: int,
     source_emails: Optional[List[Dict]] = None,
 ) -> str:
@@ -1882,11 +2070,9 @@ def merge_batch_summaries_with_kimi(
 
     system_prompt = f"""你是一位专业的对冲基金研究分析师，擅长把多个子批次摘要合并成一份固定模板晨报的结构化 JSON。
 
-{get_report_prompt_governance()}
+{get_hf_role_guidance()}
 
-## 额外参考规范
-以下内容来自项目内的晨报规范文档，仅用于帮助你做内容取舍、章节语气和信息密度控制；最终排版仍以固定 JSON 槽位和本地模板为准。
-{build_format_spec_guidance(format_spec) or "（无额外参考规范）"}
+{get_report_prompt_governance()}
 
 ## 合并任务
 你会收到若干份子批次摘要，这些摘要来自同一天的同一组 {total_email_count} 封卖方邮件。请完成以下工作：
@@ -1895,24 +2081,23 @@ def merge_batch_summaries_with_kimi(
 3. 如果主题出现在多个批次中，合并其事实、观点与邮件覆盖面
 4. 外部引述、媒体消息、市场传闻必须保留真实主语和归因提醒
 5. 普通功能升级、一般性产品更新、没有交易含义的 trivial 变化默认忽略或显著降权
+6. Executive Summary 必须明确拆成“市场大背景”和“关键信号”
+7. 核心事实要尽量短，不要写成长段解释
 
 {get_fixed_report_schema_prompt()}
 """
 
     user_prompt = f"""请将以下结构化子批次摘要合并成最终中文晨报 JSON。
 
-{summaries_text}
+要求：
+- 使用简体中文
+- 只返回合法 JSON
 
-请特别检查每个主题：
-- 核心事实里是否混入了观点判断
-- 观点主语是否被误写成发件机构
-- 外部引述是否被错误升级为券商判断
-- 是否把没有明确投资含义的 trivial 功能升级写进了核心版面
-- Executive Summary 是否明确包含 `市场背景` 与 `关键信号`
-- 核心事实是否仍然过长、过啰嗦
+子批次摘要：
+{summaries_text}
 """
 
-    raw = generate_with_kimi(system_prompt, user_prompt)
+    raw = generate_with_llm(system_prompt, user_prompt)
     return render_report_html(parse_report_payload_json(raw), source_emails=source_emails)
 
 
@@ -2018,14 +2203,14 @@ def mark_emails_processed(email_uids: List[str]):
 
 # ============ AI 分析 ============
 
-def call_kimi_api(
+def call_llm_api(
     api_config: dict,
     system_prompt: str,
     user_prompt: str,
     user_content_blocks: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
-    调用 Kimi API，返回 HTML 内容或 None
+    调用兼容 chat/completions 的大模型 API，返回文本结果或 None
     """
     url = f"{api_config['base_url']}/chat/completions"
     headers = {
@@ -2045,9 +2230,18 @@ def call_kimi_api(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message_content}
         ],
-        "temperature": 1.0,
-        "max_tokens": MAX_COMPLETION_TOKENS
     }
+
+    if is_openai_chat_api(api_config) and is_openai_gpt5_family(api_config):
+        payload["max_completion_tokens"] = MAX_COMPLETION_TOKENS
+        reasoning_effort = str(api_config.get("reasoning_effort", "") or "").strip()
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        else:
+            payload["temperature"] = 1.0
+    else:
+        payload["temperature"] = 1.0
+        payload["max_tokens"] = MAX_COMPLETION_TOKENS
 
     resp = session.post(url, json=payload, headers=headers, timeout=300)
     try:
@@ -2070,7 +2264,7 @@ def call_kimi_api(
         return None
 
 
-def call_kimi_api_with_retries(
+def call_llm_api_with_retries(
     api_config: dict,
     system_prompt: str,
     user_prompt: str,
@@ -2086,8 +2280,8 @@ def call_kimi_api_with_retries(
 
     for attempt in range(max_retries + 1):
         try:
-            logger.info(f"🤖 正在调用 Kimi 大模型分析... ({label}: {api_config['base_url']})")
-            html_content = call_kimi_api(
+            logger.info(f"🤖 正在调用主/备大模型分析... ({label}: {api_config['base_url']})")
+            html_content = call_llm_api(
                 api_config,
                 system_prompt,
                 user_prompt,
@@ -2114,24 +2308,21 @@ def call_kimi_api_with_retries(
     return None
 
 
-def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[str]:
+def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
     """
-    调用 Kimi 大模型分析邮件，生成 HF Morning Brief HTML
+    调用主/备大模型分析邮件，生成 HF Morning Brief HTML
     支持尾部清洗、超长上下文拆批分析，以及主/备模型自动切换
     """
     email_count = len(emails)
     email_batches = split_emails_for_analysis(emails)
-    format_spec_guidance = build_format_spec_guidance(format_spec)
 
     if len(email_batches) == 1:
         emails_text = build_emails_text(email_batches[0], email_count, total_body_budget=MAX_PROMPT_BODY_CHARS)
         system_prompt = f"""你是一位专业的对冲基金研究分析师，擅长将卖方邮件转化为固定模板晨报的结构化 JSON。
 
-{get_report_prompt_governance()}
+{get_hf_role_guidance()}
 
-## 额外参考规范
-以下内容来自项目内的晨报规范文档，仅用于帮助你做内容取舍、章节语气和信息密度控制；最终排版仍以固定 JSON 槽位和本地模板为准。
-{format_spec_guidance or "（无额外参考规范）"}
+{get_report_prompt_governance()}
 
 ## 图片理解指引（重要！必须遵循）
 邮件中可能包含图片（图表、截图、照片等），请按以下规则理解和处理：
@@ -2159,20 +2350,16 @@ def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[s
 
         user_prompt = f"""请分析以下邮件，生成最终晨报 JSON。
 
-**重要：请使用简体中文（中文）输出所有字段内容。**
+要求：
+- 使用简体中文输出所有字段内容
+- 只返回合法 JSON，不要补充解释
 
 邮件内容：
-{emails_text}
+{emails_text}"""
 
-请严格按照固定模板槽位返回 JSON。
-
-**注意：排序按邮件覆盖频率，但不要在输出中显示频率数字（如"3/3"、"2/3"）。**
-**额外注意：不要把第三方被引述的观点错误写成发件机构观点；不要把观点判断错误写进核心事实。**
-**如果邮件里只是功能上线、版本升级、界面变化、一般性产品更新，而没有清晰交易含义，请忽略或降权，不要放进核心版面。**"""
-
-        raw = generate_with_kimi(system_prompt, user_prompt, emails=emails)
+        raw = generate_with_llm(system_prompt, user_prompt, emails=emails)
         html_content = render_report_html(parse_report_payload_json(raw), source_emails=emails)
-        logger.info("✅ Kimi 分析完成")
+        logger.info("✅ 大模型分析完成")
         return html_content
 
     logger.info(f"✂️ 上下文较长，拆分为 {len(email_batches)} 个批次进行分析后合并")
@@ -2180,7 +2367,7 @@ def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[s
     for idx, batch in enumerate(email_batches, 1):
         logger.info(f"🧩 正在分析子批次 {idx}/{len(email_batches)}（{len(batch)} 封邮件）")
         batch_summaries.append(
-            analyze_batch_summary_with_kimi(
+            analyze_batch_summary_with_llm(
                 batch,
                 total_email_count=email_count,
                 batch_index=idx,
@@ -2188,13 +2375,12 @@ def analyze_emails_with_kimi(emails: List[Dict], format_spec: str) -> Optional[s
             )
         )
 
-    html_content = merge_batch_summaries_with_kimi(
+    html_content = merge_batch_summaries_with_llm(
         batch_summaries,
-        format_spec,
         total_email_count=email_count,
         source_emails=emails,
     )
-    logger.info("✅ Kimi 分析完成")
+    logger.info("✅ 大模型分析完成")
     return html_content
 
 
@@ -2291,8 +2477,16 @@ def normalize_report_body_content(body_content: str) -> str:
     normalized = normalize_existing_heading_tags(normalized)
     normalized = normalize_semantic_callout_blocks(normalized)
     normalized = normalize_inline_labeled_paragraphs(normalized)
+    normalized = strip_emojis_from_html_content(normalized)
     normalized = strip_highlight_inside_headings(normalized)
     return normalized
+
+
+def strip_emojis_from_html_content(body_content: str) -> str:
+    """本地禁用 emoji，避免视觉风格漂移和模型偶发装饰性输出。"""
+    if not body_content:
+        return body_content
+    return EMOJI_PATTERN.sub("", body_content)
 
 
 def normalize_legacy_label_boxes(body_content: str) -> str:
@@ -2335,7 +2529,7 @@ def format_html_report(
     normalize_body: bool = True,
 ) -> str:
     """
-    格式校准：将Kimi生成的HTML格式化为标准格式
+    格式校准：将模型生成的 HTML 格式化为标准格式
     应用参考文件的CSS样式和结构
     """
     import re
@@ -2608,16 +2802,26 @@ def save_report(html_content: str, source_emails: Optional[List[Dict]] = None) -
 
     logger.info("✅ 格式校准完成")
 
-    # 生成文件名：保留带时间戳的工件，避免 daily / supplement / 重跑互相覆盖
+    # 双写报告文件：
+    # 1. 保留带时间戳的工件，避免 daily / supplement / 重跑互相覆盖
+    # 2. 额外覆盖一份不带时间戳的“最终产物”，方便对外查看和引用
     now_bjt = datetime.now(BJT)
     today_str = now_bjt.strftime("%Y%m%d")
     timestamp_str = now_bjt.strftime("%H%M%S")
-    report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}_{timestamp_str}.html")
+    archived_report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}_{timestamp_str}.html")
+    report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}.html")
 
     try:
+        with open(archived_report_file, 'w', encoding='utf-8') as f:
+            f.write(html_content)
         with open(report_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
-        logger.info(f"💾 已保存报告: {report_file} ({len(html_content)} bytes)")
+        logger.info(
+            "💾 已保存报告: %s（稳定产物），并留档: %s (%s bytes)",
+            report_file,
+            archived_report_file,
+            len(html_content),
+        )
         return report_file
     except Exception as e:
         logger.error(f"❌ 保存报告失败: {e}")
@@ -2628,6 +2832,10 @@ def check_for_report() -> Optional[str]:
     """检查是否生成了报告文件"""
     today_str = datetime.now(BJT).strftime("%Y%m%d")
 
+    report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}.html")
+    if os.path.exists(report_file):
+        return report_file
+
     timestamped_reports = sorted(
         glob.glob(os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}_*.html")),
         key=os.path.getmtime,
@@ -2635,11 +2843,6 @@ def check_for_report() -> Optional[str]:
     )
     if timestamped_reports:
         return timestamped_reports[0]
-
-    # 兼容旧格式
-    report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}.html")
-    if os.path.exists(report_file):
-        return report_file
 
     # 检查旧格式（兼容）
     report_file = os.path.join(BASE_DIR, f"{REPORT_PREFIX}{today_str}.html")
@@ -2827,7 +3030,7 @@ def print_status():
 def main():
     """主程序"""
     print("=" * 60)
-    print("🚀 QClaw 邮件自动处理 - Kimi AI 分析版")
+    print("🚀 QClaw 邮件自动处理 - GPT / 备用模型分析版")
     print("=" * 60)
     print(f"当前时间: {datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')} (北京时间)")
     print()
@@ -2857,7 +3060,7 @@ def main():
     try:
         # 分析模式
         if analyze_mode:
-            logger.info("📊 分析模式：调用 Kimi 大模型分析已存在的邮件")
+            logger.info("📊 分析模式：调用主模型/备用模型分析已存在的邮件")
 
             # 从数据库获取待处理邮件
             emails = email_db.get_pending_emails(limit=20)
@@ -2868,17 +3071,11 @@ def main():
 
             logger.info(f"📧 待分析邮件数: {len(emails)}")
 
-            # 加载格式规范
-            format_spec = load_format_spec()
-            if not format_spec:
-                logger.error("❌ 未找到 HF_Morning_Brief_格式规范.md")
-                return
-
-            # 调用 Kimi 分析
+            # 调用主模型/备用模型分析
             try:
-                html_content = analyze_emails_with_kimi(emails, format_spec)
+                html_content = analyze_emails_with_llm(emails)
             except Exception as e:
-                logger.error(f"❌ Kimi 分析失败: {e}")
+                logger.error(f"❌ 大模型分析失败: {e}")
                 # 更新错误状态
                 state = load_state()
                 state["last_error"] = f"分析失败: {str(e)[:100]}"
@@ -2930,7 +3127,7 @@ def main():
                 else:
                     logger.error("❌ 保存报告失败")
             else:
-                logger.error("❌ Kimi 分析失败")
+                logger.error("❌ 大模型分析失败")
             return
 
         # 正常模式
@@ -2960,24 +3157,19 @@ def main():
         logger.info(f"📭 待处理邮件数: {len(emails)}")
 
         # 第二步：AI 分析
-        logger.info("【步骤 2/4】Kimi AI 分析...")
-
-        format_spec = load_format_spec()
-        if not format_spec:
-            logger.error("❌ 未找到 HF_Morning_Brief_格式规范.md")
-            return
+        logger.info("【步骤 2/4】GPT / 备用模型分析...")
 
         try:
-            html_content = analyze_emails_with_kimi(emails, format_spec)
+            html_content = analyze_emails_with_llm(emails)
         except Exception as e:
-            logger.error(f"❌ Kimi 分析失败: {e}")
+            logger.error(f"❌ 大模型分析失败: {e}")
             state = load_state()
             state["last_error"] = f"AI分析失败: {str(e)[:100]}"
             save_state(state)
             return
 
         if not html_content:
-            logger.error("❌ Kimi 分析失败，跳过后续步骤")
+            logger.error("❌ 大模型分析失败，跳过后续步骤")
             return
 
         report_file = save_report(html_content, source_emails=emails)
@@ -3059,6 +3251,15 @@ def main():
         print("\n✅ 流程完成")
     finally:
         release_analysis_lock(analysis_lock)
+
+
+# 向后兼容旧函数名，避免外部脚本和临时调试代码立即失效。
+call_kimi_api = call_llm_api
+call_kimi_api_with_retries = call_llm_api_with_retries
+generate_with_kimi = generate_with_llm
+analyze_batch_summary_with_kimi = analyze_batch_summary_with_llm
+merge_batch_summaries_with_kimi = merge_batch_summaries_with_llm
+analyze_emails_with_kimi = analyze_emails_with_llm
 
 
 if __name__ == "__main__":
