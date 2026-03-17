@@ -12,6 +12,22 @@ from unittest.mock import Mock, patch
 
 
 class SmokeTests(unittest.TestCase):
+    def assertContainsAll(self, text, snippets):
+        for snippet in snippets:
+            self.assertIn(snippet, text)
+
+    def assertSharedReportPromptDiscipline(self, module, system_prompt):
+        self.assertContainsAll(
+            system_prompt,
+            [
+                module.get_hf_role_guidance(),
+                module.get_report_prompt_governance(),
+                module.get_shared_fact_attribution_rules(),
+                module.get_report_output_contract(),
+                module.get_report_slot_boundary_rules(),
+            ],
+        )
+
     def test_config_example_has_no_real_key(self):
         repo_root = os.path.dirname(os.path.dirname(__file__))
         cfg_path = os.path.join(repo_root, "config.yaml.example")
@@ -311,6 +327,9 @@ class SmokeTests(unittest.TestCase):
               "title": "NVDA 推理芯片",
               "email_ids": [1],
               "coverage_count": 1,
+              "merge_key": "NVDA | 推理芯片 | 正向",
+              "time_horizon": "短期",
+              "target_slot": "core_events",
               "fact_subject": "NVDA",
               "opinion_subject": "Shawn Kim",
               "info_type": "外部引述",
@@ -327,6 +346,9 @@ class SmokeTests(unittest.TestCase):
 
         self.assertEqual(parsed["topics"][0]["opinion_subject"], "Shawn Kim")
         self.assertEqual(parsed["topics"][0]["info_type"], "外部引述")
+        self.assertEqual(parsed["topics"][0]["merge_key"], "NVDA | 推理芯片 | 正向")
+        self.assertEqual(parsed["topics"][0]["time_horizon"], "短期")
+        self.assertEqual(parsed["topics"][0]["target_slot"], "core_events")
         self.assertIn("source_evidence", parsed["topics"][0])
 
     def test_primary_network_failure_falls_back_to_backup(self):
@@ -493,6 +515,57 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("Executive Summary", result)
         self.assertEqual(calls, ["https://backup2.example/v1"])
 
+    def test_generate_with_llm_pins_to_successful_backup_within_same_run(self):
+        import qclaw_mail_file
+
+        calls = []
+        routing_state = {"disabled_model_keys": set()}
+
+        def fake_load():
+            qclaw_mail_file.LLM_BACKUP_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP_CONFIG.update({
+                "api_key": "backup-key",
+                "base_url": "https://backup.example/v1",
+                "model": "kimi-k2.5",
+                "supports_vision": True,
+            })
+            qclaw_mail_file.LLM_BACKUP2_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP2_CONFIG.update({
+                "api_key": "",
+                "base_url": "https://backup2.example/v1",
+                "model": "gpt-5.4",
+                "supports_vision": True,
+            })
+            return {
+                "api_key": "primary-key",
+                "base_url": "https://primary.example/v1",
+                "model": "gpt-5.4",
+                "supports_vision": True,
+            }
+
+        def fake_retry(api_config, system_prompt, user_prompt, label, **kwargs):
+            calls.append((label, api_config["base_url"]))
+            if api_config["base_url"] == "https://primary.example/v1":
+                return None
+            return "{\"ok\": true}"
+
+        with patch.object(qclaw_mail_file, "load_llm_config", side_effect=fake_load):
+            with patch.object(qclaw_mail_file, "build_multimodal_user_blocks", return_value=[]):
+                with patch.object(qclaw_mail_file, "call_llm_api_with_retries", side_effect=fake_retry):
+                    first = qclaw_mail_file.generate_with_llm("sys", "user", routing_state=routing_state)
+                    second = qclaw_mail_file.generate_with_llm("sys", "user", routing_state=routing_state)
+
+        self.assertEqual(first, "{\"ok\": true}")
+        self.assertEqual(second, "{\"ok\": true}")
+        self.assertEqual(
+            calls,
+            [
+                ("主API", "https://primary.example/v1"),
+                ("备用API", "https://backup.example/v1"),
+                ("备用API", "https://backup.example/v1"),
+            ],
+        )
+
     def test_analyze_sanitizes_inline_image_payloads(self):
         import qclaw_mail_file
 
@@ -609,6 +682,31 @@ class SmokeTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 2)
 
+    def test_build_multimodal_user_blocks_no_longer_caps_image_count(self):
+        import qclaw_mail_file
+
+        attachments = []
+        for idx in range(8):
+            attachments.append({
+                "filename": f"chart{idx}.png",
+                "content_type": "image/png",
+                "size": 128,
+                "kind": "image",
+                "data_url": f"data:image/png;base64,AAAA{idx}",
+            })
+
+        emails = [{
+            "subject": "many imgs",
+            "attachments": json.dumps(attachments),
+        }]
+
+        blocks = qclaw_mail_file.build_multimodal_user_blocks(
+            emails,
+            {"model": "kimi-k2.5", "supports_vision": True},
+        )
+
+        self.assertEqual(len(blocks), 16)
+
     def test_call_llm_api_sends_multimodal_payload(self):
         import qclaw_mail_file
 
@@ -664,6 +762,57 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "medium")
         self.assertNotIn("max_tokens", payload)
         self.assertNotIn("temperature", payload)
+
+    def test_call_llm_api_uses_openai_json_schema_response_format_when_available(self):
+        import qclaw_mail_file
+
+        fake_resp = Mock()
+        fake_resp.json.return_value = {
+            "choices": [{"message": {"content": "{\"ok\": true}"}}]
+        }
+        fake_resp.raise_for_status.return_value = None
+        response_format = qclaw_mail_file.build_report_response_format()
+
+        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+            qclaw_mail_file.call_llm_api(
+                {
+                    "api_key": "k",
+                    "base_url": "https://api.openai.com/v1",
+                    "model": "gpt-5.4",
+                    "supports_vision": True,
+                },
+                "system",
+                "user prompt",
+                response_format=response_format,
+            )
+
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["response_format"], response_format)
+
+    def test_call_llm_api_ignores_json_schema_response_format_for_non_openai_provider(self):
+        import qclaw_mail_file
+
+        fake_resp = Mock()
+        fake_resp.json.return_value = {
+            "choices": [{"message": {"content": "{\"ok\": true}"}}]
+        }
+        fake_resp.raise_for_status.return_value = None
+
+        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+            qclaw_mail_file.call_llm_api(
+                {
+                    "api_key": "k",
+                    "base_url": "https://api.moonshot.cn/v1",
+                    "model": "kimi-k2.5",
+                    "supports_vision": True,
+                },
+                "system",
+                "user prompt",
+                response_format=qclaw_mail_file.build_report_response_format(),
+            )
+
+        _, kwargs = post.call_args
+        self.assertNotIn("response_format", kwargs["json"])
 
     def test_split_emails_for_analysis_when_context_too_long(self):
         import qclaw_mail_file
@@ -763,7 +912,7 @@ class SmokeTests(unittest.TestCase):
         html = "<html><body><p><strong>Catalysts to Watch:</strong></p><ul><li>A</li></ul></body></html>"
         formatted = qclaw_mail_file.format_html_report(html)
 
-        self.assertIn("<h3>Catalysts to Watch</h3>", formatted)
+        self.assertIn("<h2>Catalysts to Watch</h2>", formatted)
         self.assertNotIn("<p><strong>Catalysts to Watch:</strong></p>", formatted)
 
     def test_format_html_report_promotes_short_english_bold_heading_without_colon(self):
@@ -772,8 +921,23 @@ class SmokeTests(unittest.TestCase):
         html = "<html><body><p><strong>Catalysts to Watch</strong></p><ul><li>A</li></ul></body></html>"
         formatted = qclaw_mail_file.format_html_report(html)
 
-        self.assertIn("<h3>Catalysts to Watch</h3>", formatted)
+        self.assertIn("<h2>Catalysts to Watch</h2>", formatted)
         self.assertNotIn("<p><strong>Catalysts to Watch</strong></p>", formatted)
+
+    def test_format_html_report_does_not_promote_executive_or_action_labels_to_h2(self):
+        import qclaw_mail_file
+
+        html = (
+            "<html><body>"
+            "<p><strong>关键信号:</strong></p><ul><li>A</li></ul>"
+            "<p><strong>Action</strong></p><p>跟踪验证。</p>"
+            "</body></html>"
+        )
+        formatted = qclaw_mail_file.format_html_report(html)
+
+        self.assertNotIn("<h2>关键信号</h2>", formatted)
+        self.assertNotIn("<h2>Action</h2>", formatted)
+        self.assertIn('<h4 class="detail-label">Action</h4>', formatted)
 
     def test_format_html_report_promotes_standalone_core_fact_label_to_h4(self):
         import qclaw_mail_file
@@ -790,8 +954,8 @@ class SmokeTests(unittest.TestCase):
         html = "<html><body><p><strong>投资启示</strong>：关注NVDA与MU。</p></body></html>"
         formatted = qclaw_mail_file.format_html_report(html)
 
-        self.assertIn("<p><strong>投资启示</strong></p>", formatted)
-        self.assertIn("<p>关注NVDA与MU。</p>", formatted)
+        self.assertIn('<h4 class="detail-label">投资启示</h4>', formatted)
+        self.assertIn('<p class="detail-copy">关注NVDA与MU。</p>', formatted)
         self.assertNotIn("<p><strong>投资启示</strong>：关注NVDA与MU。</p>", formatted)
 
     def test_format_html_report_wraps_standalone_action_label_block(self):
@@ -800,7 +964,7 @@ class SmokeTests(unittest.TestCase):
         html = "<html><body><h4>投资启示</h4><p>关注NVDA与MU。</p></body></html>"
         formatted = qclaw_mail_file.format_html_report(html)
 
-        self.assertIn("<p><strong>投资启示</strong></p>", formatted)
+        self.assertIn('<h4 class="detail-label">投资启示</h4>', formatted)
         self.assertIn("<p>关注NVDA与MU。</p>", formatted)
         self.assertNotIn("<h4>投资启示</h4><p>关注NVDA与MU。</p>", formatted)
 
@@ -810,7 +974,7 @@ class SmokeTests(unittest.TestCase):
         html = "<html><body><h4>为什么重要</h4><p>这会影响估值锚。</p></body></html>"
         formatted = qclaw_mail_file.format_html_report(html)
 
-        self.assertIn("<p><strong>为什么重要</strong></p>", formatted)
+        self.assertIn('<h4 class="detail-label">为什么重要</h4>', formatted)
         self.assertIn("<p>这会影响估值锚。</p>", formatted)
 
     def test_format_html_report_rewrites_legacy_callout_boxes_to_fixed_labels(self):
@@ -824,9 +988,9 @@ class SmokeTests(unittest.TestCase):
         )
         formatted = qclaw_mail_file.format_html_report(html)
 
-        self.assertIn("<p><strong>投资启示</strong></p>", formatted)
+        self.assertIn('<h4 class="detail-label">投资启示</h4>', formatted)
         self.assertIn("<p>关注估值修复。</p>", formatted)
-        self.assertIn("<p><strong>信号</strong></p>", formatted)
+        self.assertIn('<h4 class="detail-label">信号</h4>', formatted)
         self.assertIn("<p>成交量回暖。</p>", formatted)
         self.assertNotIn('class="action-box"', formatted)
         self.assertNotIn('class="signal-box"', formatted)
@@ -907,7 +1071,7 @@ class SmokeTests(unittest.TestCase):
         }]
         prompts = {}
 
-        def fake_generate(system_prompt, user_prompt, emails=None):
+        def fake_generate(system_prompt, user_prompt, emails=None, **kwargs):
             prompts["system"] = system_prompt
             prompts["user"] = user_prompt
             return """{
@@ -948,36 +1112,27 @@ class SmokeTests(unittest.TestCase):
 
         self.assertIn("NVDA / MU 推理链路", result)
         self.assertIn("Shawn Kim says", prompts["user"])
-        self.assertIn("你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师", prompts["system"])
-        self.assertIn("你的职责不是机械复述邮件，而是帮助分析师快速看清", prompts["system"])
-        self.assertIn("市场大背景优先写宏观主线", prompts["system"])
-        self.assertIn("语言要像盘前晨报，不像长报告", prompts["system"])
-        self.assertIn("不能把外部引述、媒体报道、市场传闻误写成发件机构 house view", prompts["system"])
+        self.assertSharedReportPromptDiscipline(qclaw_mail_file, prompts["system"])
+        self.assertIn(qclaw_mail_file.get_fixed_report_schema_prompt().strip(), prompts["system"])
         self.assertNotIn("额外参考规范", prompts["system"])
         self.assertNotIn("不要把第三方被引述的观点错误写成发件机构观点", prompts["user"])
         self.assertNotIn("功能上线、版本升级、界面变化、一般性产品更新", prompts["user"])
-        self.assertIn("`Executive Summary` 下面固定只放 `市场大背景` 和 `关键信号`", prompts["system"])
-        self.assertIn("核心事实每条尽量一句话", prompts["system"])
-        self.assertIn("关键信号、投资启示、Bottom Line 都优先写成短句", prompts["system"])
         self.assertIn("只返回合法 JSON，不要补充解释", prompts["user"])
-        self.assertIn('"executive_summary"', prompts["system"])
-        self.assertIn('"core_events"', prompts["system"])
-        self.assertIn('"local_news"', prompts["system"])
-        self.assertIn('"actionable_ideas"', prompts["system"])
-        self.assertIn('"priority_rank"', prompts["system"])
-        self.assertIn('"coverage_count"', prompts["system"])
-        self.assertIn('"global_score"', prompts["system"])
-        self.assertIn('"source_topics"', prompts["system"])
-        self.assertIn('"linked_core_event_headlines"', prompts["system"])
+        self.assertContainsAll(
+            prompts["system"],
+            ['"executive_summary"', '"core_events"', '"local_news"', '"actionable_ideas"', '"priority_rank"', '"coverage_count"', '"global_score"', '"source_topics"', '"linked_core_event_headlines"'],
+        )
 
     def test_batch_summary_prompt_requests_structured_attribution_fields(self):
         import qclaw_mail_file
 
         prompts = {}
+        response_formats = {}
 
-        def fake_generate(system_prompt, user_prompt, emails=None):
+        def fake_generate(system_prompt, user_prompt, emails=None, **kwargs):
             prompts["system"] = system_prompt
             prompts["user"] = user_prompt
+            response_formats["batch"] = kwargs.get("response_format")
             return """{
               "batch_index": 1,
               "batch_total": 1,
@@ -1000,19 +1155,49 @@ class SmokeTests(unittest.TestCase):
             parsed = qclaw_mail_file.analyze_batch_summary_with_llm(emails, total_email_count=1, batch_index=1, batch_total=1)
 
         self.assertEqual(parsed["batch_index"], 1)
-        self.assertIn("你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师", prompts["system"])
-        self.assertIn('"fact_subject"', prompts["system"])
-        self.assertIn('"opinion_subject"', prompts["system"])
-        self.assertIn('"source_evidence"', prompts["system"])
-        self.assertIn("不能把转述者默认当作观点提出者", prompts["system"])
+        self.assertSharedReportPromptDiscipline(qclaw_mail_file, prompts["system"])
+        self.assertIn(qclaw_mail_file.get_batch_summary_stage_rules(), prompts["system"])
+        self.assertContainsAll(
+            prompts["system"],
+            ['"merge_key"', '"time_horizon"', '"target_slot"', '"fact_subject"', '"opinion_subject"', '"source_evidence"'],
+        )
+        self.assertEqual(response_formats["batch"], qclaw_mail_file.build_batch_summary_response_format())
         self.assertIn("只返回合法 JSON", prompts["user"])
+
+    def test_single_stage_analysis_requests_report_response_format(self):
+        import qclaw_mail_file
+
+        response_formats = {}
+
+        def fake_generate(system_prompt, user_prompt, emails=None, **kwargs):
+            response_formats["report"] = kwargs.get("response_format")
+            return """{
+              "executive_summary": {"market_background": "背景", "key_signals": ["信号"]},
+              "core_events": [],
+              "local_news": [],
+              "peripheral_intelligence": {"mapped_events": [], "cross_market_signals": []},
+              "actionable_ideas": {"short_term": [], "medium_term": [], "catalysts": [], "bottom_line": "结论"}
+            }"""
+
+        emails = [{
+            "subject": "attr",
+            "from_name": "Broker",
+            "from": "broker@example.com",
+            "date": "2026-03-16 00:00:00+08:00",
+            "body": "Shawn Kim says SRAM is a complement to HBM.",
+        }]
+
+        with patch.object(qclaw_mail_file, "generate_with_llm", side_effect=fake_generate):
+            qclaw_mail_file.analyze_emails_with_llm(emails)
+
+        self.assertEqual(response_formats["report"], qclaw_mail_file.build_report_response_format())
 
     def test_merge_prompt_discourages_trivial_updates(self):
         import qclaw_mail_file
 
         prompts = {}
 
-        def fake_generate(system_prompt, user_prompt, emails=None):
+        def fake_generate(system_prompt, user_prompt, emails=None, **kwargs):
             prompts["system"] = system_prompt
             prompts["user"] = user_prompt
             return """{
@@ -1043,18 +1228,10 @@ class SmokeTests(unittest.TestCase):
                 total_email_count=1,
             )
 
-        self.assertIn("你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师", prompts["system"])
-        self.assertIn("不要把 Actionable Ideas 写成待办清单", prompts["system"])
-        self.assertIn("Actionable Ideas 要短、狠、可执行", prompts["system"])
-        self.assertIn("Local News 不是次要垃圾桶", prompts["system"])
-        self.assertIn("功能小升级", prompts["system"])
-        self.assertIn("trivial 变化默认忽略或显著降权", prompts["system"])
-        self.assertIn("市场大背景", prompts["system"])
-        self.assertIn("关键信号", prompts["system"])
-        self.assertIn("核心事实要尽量短", prompts["system"])
-        self.assertIn("如果一句话已经表达出判断，就不要再追加第二句做弱信息量复述", prompts["system"])
+        self.assertSharedReportPromptDiscipline(qclaw_mail_file, prompts["system"])
+        self.assertIn(qclaw_mail_file.get_merge_stage_rules(1), prompts["system"])
+        self.assertIn(qclaw_mail_file.get_fixed_report_schema_prompt().strip(), prompts["system"])
         self.assertIn("只返回合法 JSON", prompts["user"])
-        self.assertIn("Actionable Ideas` 不是剩余信息区", prompts["system"])
 
     def test_parse_report_payload_json_normalizes_schema(self):
         import qclaw_mail_file
@@ -1580,12 +1757,12 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("<strong>关键信号:</strong>", html)
         self.assertIn("<h2>Key Coverage | 核心事件与市场观点</h2>", html)
         self.assertIn("<th>观点来源</th>", html)
-        self.assertIn("<p><strong>投资启示</strong></p>", html)
+        self.assertIn('<h4 class="detail-label">投资启示</h4>', html)
         self.assertIn("<h2>Local News | 容易被忽略的信号</h2>", html)
-        self.assertIn("<p><strong>信号</strong></p>", html)
-        self.assertIn("<p>信号内容</p>", html)
-        self.assertIn("<p><strong>为什么重要</strong></p>", html)
-        self.assertIn("<p><strong>Action</strong></p>", html)
+        self.assertIn('<h4 class="detail-label">信号</h4>', html)
+        self.assertIn('<p class="detail-copy">信号内容</p>', html)
+        self.assertIn('<h4 class="detail-label">为什么重要</h4>', html)
+        self.assertIn('<h4 class="detail-label">Action</h4>', html)
         self.assertIn("<h2>Peripheral Intelligence | 外围信息/类比映射</h2>", html)
         self.assertIn("<th>外围事件</th>", html)
         self.assertIn("<h2>Actionable Ideas</h2>", html)
@@ -1731,7 +1908,7 @@ class SmokeTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("<p>只是普通更新</p>", html)
+        self.assertIn('<p class="detail-copy">只是普通更新</p>', html)
         self.assertIn('<span class="highlight">系统性流动性收缩</span>', html)
         self.assertIn('<span class="highlight">估值折扣创造entry point</span>', html)
         self.assertNotIn('<span class="highlight">只是普通更新</span>', html)

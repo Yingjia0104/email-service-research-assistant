@@ -29,7 +29,7 @@ import traceback
 import fcntl
 from html import escape, unescape
 from datetime import datetime
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
 from functools import wraps
 from io import BytesIO
 
@@ -88,7 +88,6 @@ MAX_PROMPT_BODY_CHARS = 40000
 MAX_COMPLETION_TOKENS = 12000
 BATCH_SPLIT_TRIGGER_CHARS = 26000
 MIN_TRUNCATION_CONTENT_CHARS = 40
-MAX_MULTIMODAL_IMAGES = 6
 MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
 
 EMOJI_PATTERN = re.compile(
@@ -450,6 +449,248 @@ def is_openai_gpt5_family(api_config: Dict[str, Any]) -> bool:
     return model_name.startswith("gpt-5")
 
 
+def supports_openai_json_schema_response_format(api_config: Dict[str, Any]) -> bool:
+    """仅在已知支持的 OpenAI 官方模型上启用原生 JSON Schema 输出。"""
+    return is_openai_chat_api(api_config) and is_openai_gpt5_family(api_config)
+
+
+def build_json_schema_response_format(name: str, schema: Dict[str, Any], strict: bool = True) -> Dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "strict": strict,
+            "schema": schema,
+        },
+    }
+
+
+def build_batch_summary_response_format() -> Dict[str, Any]:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["batch_index", "batch_total", "email_ids", "topics"],
+        "properties": {
+            "batch_index": {"type": "integer"},
+            "batch_total": {"type": "integer"},
+            "email_ids": {"type": "array", "items": {"type": "integer"}},
+            "topics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "title",
+                        "email_ids",
+                        "coverage_count",
+                        "merge_key",
+                        "time_horizon",
+                        "target_slot",
+                        "fact_subject",
+                        "opinion_subject",
+                        "info_type",
+                        "core_facts",
+                        "market_takeaways",
+                        "tickers",
+                        "source_evidence",
+                    ],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "email_ids": {"type": "array", "items": {"type": "integer"}},
+                        "coverage_count": {"type": "integer"},
+                        "merge_key": {"type": "string"},
+                        "time_horizon": {"type": "string"},
+                        "target_slot": {
+                            "type": "string",
+                            "enum": [
+                                "core_events",
+                                "local_news",
+                                "peripheral_intelligence",
+                                "actionable_ideas",
+                            ],
+                        },
+                        "fact_subject": {"type": "string"},
+                        "opinion_subject": {"type": "string"},
+                        "info_type": {"type": "string"},
+                        "core_facts": {"type": "array", "items": {"type": "string"}},
+                        "market_takeaways": {"type": "array", "items": {"type": "string"}},
+                        "tickers": {"type": "array", "items": {"type": "string"}},
+                        "source_evidence": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+        },
+    }
+    return build_json_schema_response_format("hf_batch_summary", schema)
+
+
+def build_report_response_format() -> Dict[str, Any]:
+    market_view_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["source", "stance", "thesis"],
+        "properties": {
+            "source": {"type": "string"},
+            "stance": {"type": "string"},
+            "thesis": {"type": "string"},
+            "stance_highlight_phrases": {"type": "array", "items": {"type": "string"}},
+            "thesis_highlight_phrases": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    core_event_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "headline",
+            "priority_rank",
+            "coverage_count",
+            "global_score",
+            "source_topics",
+            "core_facts",
+            "market_views",
+            "action",
+            "attribution_note",
+            "source_evidence",
+        ],
+        "properties": {
+            "headline": {"type": "string"},
+            "priority_rank": {"type": "integer"},
+            "coverage_count": {"type": "integer"},
+            "global_score": {"type": "number"},
+            "source_topics": {"type": "array", "items": {"type": "string"}},
+            "core_facts": {"type": "array", "items": {"type": "string"}},
+            "market_views": {"type": "array", "items": market_view_schema},
+            "action": {"type": "string"},
+            "highlight_phrases": {"type": "array", "items": {"type": "string"}},
+            "attribution_note": {"type": "string"},
+            "source_evidence": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    local_news_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["headline", "priority_rank", "signal", "importance", "action"],
+        "properties": {
+            "headline": {"type": "string"},
+            "priority_rank": {"type": "integer"},
+            "signal": {"type": "string"},
+            "importance": {"type": "string"},
+            "action": {"type": "string"},
+            "highlight_phrases": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    mapped_event_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["event", "related_company", "mapping"],
+        "properties": {
+            "event": {"type": "string"},
+            "related_company": {"type": "string"},
+            "mapping": {"type": "string"},
+        },
+    }
+    cross_market_signal_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["headline", "priority_rank", "bullets"],
+        "properties": {
+            "headline": {"type": "string"},
+            "priority_rank": {"type": "integer"},
+            "bullets": {"type": "array", "items": {"type": "string"}},
+            "highlight_phrases": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    actionable_item_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "idea",
+            "priority_rank",
+            "coverage_count",
+            "global_score",
+            "source_topics",
+            "linked_core_event_headlines",
+        ],
+        "properties": {
+            "idea": {"type": "string"},
+            "priority_rank": {"type": "integer"},
+            "coverage_count": {"type": "integer"},
+            "global_score": {"type": "number"},
+            "source_topics": {"type": "array", "items": {"type": "string"}},
+            "linked_core_event_headlines": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    catalyst_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "catalyst",
+            "time",
+            "impact",
+            "priority_rank",
+            "coverage_count",
+            "global_score",
+            "source_topics",
+            "linked_core_event_headlines",
+        ],
+        "properties": {
+            "catalyst": {"type": "string"},
+            "time": {"type": "string"},
+            "impact": {"type": "string"},
+            "priority_rank": {"type": "integer"},
+            "coverage_count": {"type": "integer"},
+            "global_score": {"type": "number"},
+            "source_topics": {"type": "array", "items": {"type": "string"}},
+            "linked_core_event_headlines": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "executive_summary",
+            "core_events",
+            "local_news",
+            "peripheral_intelligence",
+            "actionable_ideas",
+        ],
+        "properties": {
+            "executive_summary": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["market_background", "key_signals"],
+                "properties": {
+                    "market_background": {"type": "string"},
+                    "key_signals": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "core_events": {"type": "array", "items": core_event_schema},
+            "local_news": {"type": "array", "items": local_news_schema},
+            "peripheral_intelligence": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mapped_events", "cross_market_signals"],
+                "properties": {
+                    "mapped_events": {"type": "array", "items": mapped_event_schema},
+                    "cross_market_signals": {"type": "array", "items": cross_market_signal_schema},
+                },
+            },
+            "actionable_ideas": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["short_term", "medium_term", "catalysts", "bottom_line"],
+                "properties": {
+                    "short_term": {"type": "array", "items": actionable_item_schema},
+                    "medium_term": {"type": "array", "items": actionable_item_schema},
+                    "catalysts": {"type": "array", "items": catalyst_schema},
+                    "bottom_line": {"type": "string"},
+                },
+            },
+        },
+    }
+    return build_json_schema_response_format("hf_morning_brief_report", schema)
+
+
 def parse_attachment_list(raw_attachments: Any) -> List[Dict]:
     """兼容 attachments 字段的 JSON 字符串或列表结构。"""
     if not raw_attachments:
@@ -513,9 +754,6 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
         attachments = parse_attachment_list(email.get("attachments"))
 
         for attachment in attachments:
-            if image_count >= MAX_MULTIMODAL_IMAGES:
-                return blocks
-
             if attachment.get("kind") != "image":
                 continue
 
@@ -546,9 +784,6 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
             seen_urls.add(compact_url)
 
         for inline_index, data_url in enumerate(extract_inline_body_image_data_urls(email.get("body", "")), 1):
-            if image_count >= MAX_MULTIMODAL_IMAGES:
-                return blocks
-
             compact_url = re.sub(r"\s+", "", data_url)
             if compact_url in seen_urls:
                 continue
@@ -571,7 +806,37 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
             image_count += 1
             seen_urls.add(compact_url)
 
+    if image_count:
+        logger.info(f"🖼️ 本轮共识别到 {image_count} 张可用图片，已全部送入多模态分析")
+
     return blocks
+
+
+def build_llm_chain(primary_cfg: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    return [
+        ("primary", "主API", primary_cfg),
+        ("backup1", "备用API", LLM_BACKUP_CONFIG),
+        ("backup2", "备用API2", LLM_BACKUP2_CONFIG),
+    ]
+
+
+def get_ordered_llm_chain(
+    primary_cfg: Dict[str, Any],
+    routing_state: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+    chain = build_llm_chain(primary_cfg)
+    if not routing_state:
+        return chain
+
+    disabled = routing_state.setdefault("disabled_model_keys", set())
+    preferred = routing_state.get("preferred_model_key")
+    filtered = [item for item in chain if item[0] not in disabled]
+    if not preferred:
+        return filtered
+
+    preferred_items = [item for item in filtered if item[0] == preferred]
+    remaining = [item for item in filtered if item[0] != preferred]
+    return preferred_items + remaining
 
 
 def normalize_marker_text(text: str) -> str:
@@ -717,89 +982,72 @@ def build_emails_text(emails: List[Dict], total_email_count: int, total_body_bud
     return "\n".join(emails_summary)
 
 
-def generate_with_llm(system_prompt: str, user_prompt: str, emails: Optional[List[Dict]] = None) -> str:
+def generate_with_llm(
+    system_prompt: str,
+    user_prompt: str,
+    emails: Optional[List[Dict]] = None,
+    routing_state: Optional[Dict[str, Any]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> str:
     """统一封装主/备模型的短重试与切换逻辑。"""
     llm_cfg = load_llm_config()
-    api_key = llm_cfg.get("api_key", "")
-    primary_multimodal_blocks = build_multimodal_user_blocks(emails or [], llm_cfg)
-    if primary_multimodal_blocks:
-        logger.info(f"🖼️ 主模型将接收 {len(primary_multimodal_blocks) // 2} 张图片附件进行多模态分析")
+    if routing_state is not None:
+        routing_state.setdefault("disabled_model_keys", set())
 
-    if api_key:
-        result = call_llm_api_with_retries(
-            llm_cfg,
-            system_prompt,
-            user_prompt,
-            label="主API",
-            max_retries=1,
-            delay=5.0,
-            backoff=2.0,
-            user_content_blocks=primary_multimodal_blocks,
-        )
+    ordered_chain = get_ordered_llm_chain(llm_cfg, routing_state)
+    for model_key, label, api_cfg in ordered_chain:
+        api_key = api_cfg.get("api_key", "")
+        multimodal_blocks = build_multimodal_user_blocks(emails or [], api_cfg)
+        if multimodal_blocks:
+            logger.info(f"🖼️ {label} 将接收 {len(multimodal_blocks) // 2} 张图片进行多模态分析")
 
-        if result:
-            return result
-
-        if primary_multimodal_blocks:
-            logger.warning("⚠️ 主模型多模态请求失败，降级为纯文本重试")
-            result = call_llm_api_with_retries(
-                llm_cfg,
-                system_prompt,
-                user_prompt,
-                label="主API-文本降级",
-                max_retries=1,
-                delay=4.0,
-                backoff=2.0,
-                user_content_blocks=None,
-            )
-            if result:
-                logger.info("✅ 主模型文本降级成功")
-                return result
-    else:
-        key_hint = llm_cfg.get("api_key_env") or "llm.api_key"
-        logger.warning(f"⚠️ 主模型未配置可用 API Key，跳过主模型并尝试备用模型（期望来源: {key_hint}）")
-
-    backup_chain = [
-        ("备用API", LLM_BACKUP_CONFIG),
-        ("备用API2", LLM_BACKUP2_CONFIG),
-    ]
-    for label, backup_cfg in backup_chain:
-        if not backup_cfg.get("api_key"):
+        if not api_key:
+            key_hint = api_cfg.get("api_key_env") or f"{model_key}.api_key"
+            logger.warning(f"⚠️ {label} 未配置可用 API Key，跳过（期望来源: {key_hint}）")
+            if routing_state is not None:
+                routing_state["disabled_model_keys"].add(model_key)
             continue
 
-        logger.warning(f"⚠️ 主 API 不可用，切换{label}: {backup_cfg['base_url']} (模型: {backup_cfg['model']})")
-        backup_multimodal_blocks = build_multimodal_user_blocks(emails or [], backup_cfg)
-        if primary_multimodal_blocks and not backup_multimodal_blocks:
-            logger.warning(f"⚠️ {label} 当前未启用多模态支持，图片附件将仅保留正文元数据提示")
+        if label != "主API":
+            logger.warning(f"⚠️ 主 API 不可用，切换{label}: {api_cfg['base_url']} (模型: {api_cfg['model']})")
+
         result = call_llm_api_with_retries(
-            backup_cfg,
+            api_cfg,
             system_prompt,
             user_prompt,
             label=label,
             max_retries=1,
-            delay=3.0,
+            delay=5.0 if label == "主API" else 3.0,
             backoff=2.0,
-            user_content_blocks=backup_multimodal_blocks,
+            user_content_blocks=multimodal_blocks,
+            response_format=response_format,
         )
         if result:
-            logger.info(f"✅ {label} 分析完成")
+            if routing_state is not None:
+                routing_state["preferred_model_key"] = model_key
             return result
 
-        if backup_multimodal_blocks:
+        if multimodal_blocks:
             logger.warning(f"⚠️ {label} 多模态请求失败，降级为纯文本重试")
             result = call_llm_api_with_retries(
-                backup_cfg,
+                api_cfg,
                 system_prompt,
                 user_prompt,
                 label=f"{label}-文本降级",
                 max_retries=1,
-                delay=3.0,
+                delay=4.0 if label == "主API" else 3.0,
                 backoff=2.0,
                 user_content_blocks=None,
+                response_format=response_format,
             )
             if result:
                 logger.info(f"✅ {label} 文本降级成功")
+                if routing_state is not None:
+                    routing_state["preferred_model_key"] = model_key
                 return result
+
+        if routing_state is not None:
+            routing_state["disabled_model_keys"].add(model_key)
 
     logger.error("❌ 主 API 与所有备用 API 均失败")
     raise Exception("LLM API error: 主 API 和所有备用 API 均失败")
@@ -876,7 +1124,12 @@ def repair_report_payload_json(raw_text: str) -> Dict[str, Any]:
 {raw_text}
 ```"""
 
-    repaired = generate_with_llm(repair_system_prompt, repair_user_prompt, emails=None)
+    repaired = generate_with_llm(
+        repair_system_prompt,
+        repair_user_prompt,
+        emails=None,
+        response_format={"type": "json_object"},
+    )
     payload = load_json_dict_with_fallbacks(repaired)
     logger.info("✅ 模型返回的损坏 JSON 已通过修复流程恢复")
     return payload
@@ -897,6 +1150,9 @@ def parse_batch_summary_json(text: str) -> Dict:
             "title": topic.get("title", ""),
             "email_ids": topic.get("email_ids", []),
             "coverage_count": topic.get("coverage_count", 0),
+            "merge_key": topic.get("merge_key", ""),
+            "time_horizon": topic.get("time_horizon", ""),
+            "target_slot": topic.get("target_slot", ""),
             "fact_subject": topic.get("fact_subject", ""),
             "opinion_subject": topic.get("opinion_subject", ""),
             "info_type": topic.get("info_type", ""),
@@ -1587,7 +1843,7 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not normalized["actionable_ideas"]["catalysts"]:
         normalized["actionable_ideas"]["catalysts"] = [{
             "catalyst": "后续白名单邮件验证",
-            "time": "TBD",
+            "time": "",
             "impact": "相关主题与标的",
         }]
     if not normalized["actionable_ideas"]["bottom_line"]:
@@ -1618,7 +1874,6 @@ def get_report_prompt_governance() -> str:
         "优先做内容筛选和语义归因，再做摘要表达。",
         "结构稳定优先于文采，宁可朴素也不要漂移。",
         "图片、正文、附件文本需要在同一判断框架下联合理解。",
-        "默认先压缩再表达：能少写一句就不要多写一句，能删除的解释就不要保留。",
     ]
     bottom_lines = [
         "不能把外部引述、媒体报道、市场传闻误写成发件机构 house view。",
@@ -1629,7 +1884,6 @@ def get_report_prompt_governance() -> str:
     reminders = [
         "核心事实每条尽量一句话；能短就不要写成长句。",
         "关键信号、投资启示、Bottom Line 都优先写成短句，避免背景解释和同义反复。",
-        "如果一句话已经表达出判断，就不要再追加第二句做弱信息量复述。",
         "来源展示优先使用正文和主题里可识别的真实机构标签，如 MS、JPM。",
         "版式由本地固定模板渲染，模型只需要把内容填进正确槽位。",
     ]
@@ -1644,23 +1898,23 @@ def get_report_prompt_governance() -> str:
 
 def get_hf_role_guidance() -> str:
     identity = [
-        "你是一位对冲基金盘前晨报编辑，服务于一位重点覆盖 2-3 个板块的分析师。",
+        "你是一位每天会收到非常多邮件的对冲基金高级研究员，需要在每天盘前高效阅读卖方 sales 发来的内容。",
         "你的输入是已经筛选进系统的高价值卖方邮件、图表、传闻和渠道信息。",
-        "你的职责不是机械复述邮件，而是帮助分析师快速看清：今天这些重点板块里最集中的关注点是什么，市场对这些主题的主流态度和 thesis 是什么，哪些信息最可能影响预期修正和交易决策。",
+        "你的职责不是机械复述邮件，而是帮助你自己快速看清：今天最集中的关注点、市场对这些主题的主流态度和 thesis、以及哪些信息最可能影响预期修正和交易决策。",
     ]
     editorial_style = [
-        "你的读者已经知道大部分基础事实，你的价值在于提炼主线、统一归因、压缩噪音，并把最值得进入晨会讨论的内容放到最前面。",
-        "首页第一屏要像成熟的基金晨报：先给背景，再给关键信号，不要像券商邮件拼贴。",
-        "市场大背景优先写宏观主线；如果宏观不强，也至少要写成行业主线之间如何展开博弈。",
+        "你已经知道大部分基础事实，你的价值在于提炼主线、统一归因、压缩噪音，并把最值得进入晨会讨论的内容放到最前面。",
+        "在做盘前邮件信息总结时，首页先给市场背景，再给关键信号，让人快速抓住关键点。",
+        "市场背景优先写宏观或者行业层面的主线，或者近期的重点事件。",
         "核心区优先保留共识最强、可交易性最强、最可能影响预期修正的主题。",
-        "语言要像盘前晨报，不像长报告：句子尽量短，解释尽量少，避免把一个判断拆成三句来写。",
-        "如果一个点已经能被一句话讲清，就不要再补背景句、同义句和修饰句。",
+        "句子尽量短，解释尽量少；一句话能讲清，就不要拆成三句。",
+        "非常重要的内容需要高亮。",
     ]
     judgment_style = [
         "对谁真正提出观点保持高度敏感；发件机构不自动拥有正文里的所有观点，外部人物、媒体、管理层、市场传闻必须保留真实主语。",
         "默认先看哪些主题被重复提到、哪些判断正在形成共识，再决定排序和首页信号。",
         "不要为了填版面硬塞 trivial 更新、普通功能升级或没有交易含义的边角信息。",
-        "不要把 Actionable Ideas 写成待办清单；它更像投资委员会会看的交易想法与催化清单。",
+        "不要把 Actionable Ideas 写成待办清单；它更像你会放进晨会和盘前讨论里的交易想法与催化清单。",
         "Actionable Ideas 要短、狠、可执行；优先保留最核心的对象、逻辑和催化，不要写成解释型小作文。",
         "Local News 不是次要垃圾桶，而是捕捉暂时不属于核心覆盖、但可能预示预期变化或相对收益机会的边缘信号。",
         "Peripheral Intelligence 需要把非核心公司事件、跨市场变化和外围信息映射回当前最重要的投资主线。",
@@ -1672,6 +1926,78 @@ def get_hf_role_guidance() -> str:
             build_prompt_category_block("判断", judgment_style),
         ]
     )
+
+
+def get_shared_fact_attribution_rules() -> str:
+    return """## 事实与归因规则
+- 先区分事实、观点、传闻，再做摘要
+- 主语归因优先于表面语气词
+- “发件人/券商机构”不等于“正文里每一句话的观点主体”
+- 如果正文出现 `X says`、`according to X`、`reports suggest`、`媒体称`、`市场传闻`、`management said` 之类表述，必须把观点归给 X、媒体、市场或管理层，而不是默认归给发件机构
+- 带有“认为 / 预计 / 可能 / 或 / suggests / reportedly / rumor”色彩的内容，默认不是核心事实，除非邮件里给出了可验证的客观证据
+- 例如 `Shawn Kim says SRAM is a complement to HBM` 应写成 `Shawn Kim 认为...` 或 `邮件转述 Shawn Kim 的观点...`，不能写成 `MS认为...`，除非原文明确写的是 Morgan Stanley 的判断
+"""
+
+
+def get_report_output_contract() -> str:
+    return """## 输出契约
+- 只输出合法 JSON，不要 HTML，不要 Markdown，不要解释文字
+- 必须使用简体中文；ticker、公司英文名和必要英文缩写可保留原文
+- 无内容时：数组返回 `[]`，字符串返回 `\"\"`；不要返回 `null`、`None`、`N/A`、`未知`、`待定`
+- 不得新增 schema 未定义字段、额外顶层模块或说明性文字
+- 不得补写邮件中未出现、也无法从输入直接推出的机构观点、时间点、催化、数字、引述对象
+- 如果信息不足，宁可留空、降级或省略该条，也不要为了显得完整而硬写
+"""
+
+
+def get_report_slot_boundary_rules() -> str:
+    return """## 槽位边界
+- `executive_summary` 只负责市场大背景和当日最重要信号，不承担细节堆砌
+- `core_events` 只放最高优先级、最可能影响预期修正或交易决策的核心主题；同一主题应围绕同一个主要对象、事件/催化和预期变化
+- `local_news` 放没有进入核心区、但仍可能预示预期变化、情绪变化或相对收益机会的边缘信号；不要重复 `core_events`，也不要收留 trivial 噪音
+- `peripheral_intelligence` 只放能够映射回当前核心主线的外围事件、跨市场变化和类比信号；如果不能清楚映射，就不要硬写
+- `actionable_ideas` 是基于全局信息重新提炼出的交易想法与催化剂，不是剩余信息区，也不是对事实的机械改写
+"""
+
+
+def build_report_system_prompt(*extra_sections: str) -> str:
+    sections = [
+        "你是一位每天会收到非常多邮件的对冲基金高级研究员，需要在每天盘前高效阅读卖方 sales 发来的内容。",
+        get_hf_role_guidance(),
+        get_report_prompt_governance(),
+        get_shared_fact_attribution_rules(),
+        get_report_output_contract(),
+        get_report_slot_boundary_rules(),
+        *extra_sections,
+    ]
+    return "\n\n".join(section.strip() for section in sections if section and section.strip())
+
+
+def get_batch_summary_stage_rules() -> str:
+    return """## 子批次压缩纪律
+- 当前任务不是直接写最终晨报，而是为后续合并提供稳定、可对齐、可归槽的中间摘要
+- 同一对象如果对应不同催化、不同时间框架或不同预期修正方向，不要合并成一个 topic
+- 实质相同的主题在同一批次内尽量使用稳定标题，避免同义改写造成后续 merge 漂移
+- 如果你不确定两个点是否属于同一主题，优先分开写，并保留各自证据
+- 每个 topic 都要预判它最终更可能进入哪个槽位，并写入 `target_slot`
+- 每个 topic 都要写 `time_horizon`，帮助后续区分短期交易驱动和中期主线
+- 内容要极度精炼，只保留后续合并、排序和归槽真正需要的信息
+"""
+
+
+def get_merge_stage_rules(total_email_count: int) -> str:
+    return f"""## 合并任务
+你会收到若干份子批次摘要，这些摘要来自同一天的同一组 {total_email_count} 封卖方邮件。请完成以下工作：
+1. 只在“同一主要对象 + 同一底层事件/催化 + 同一主要预期方向 + 同一时间框架”成立时才合并主题
+2. 如果是同一公司但对应不同催化、不同时间框架或不同价格驱动，必须拆成不同主题，不要硬并
+3. 如果基础事实相同但市场观点有分歧，可以放在同一个 `core_events` 下用多条 `market_views` 保留分歧；不要伪造一致共识
+4. 合并时把 batch 里的 `target_slot`、`time_horizon`、`merge_key` 当作对齐提示，但不要机械照搬；若提示和证据冲突，以事实归因与原文证据为准
+5. 按合并后的覆盖邮件数排序，但不要在输出中显示覆盖数字
+6. 普通功能升级、一般性产品更新、没有交易含义的 trivial 变化默认忽略或显著降权
+7. Executive Summary 必须明确拆成“市场大背景”和“关键信号”
+8. Actionable Ideas 必须基于合并后的全局图景二次提炼，不能只是复制批次 topic 标题
+9. 核心事实要尽量短，不要写成长段解释
+"""
 
 
 def get_fixed_report_schema_prompt() -> str:
@@ -1784,6 +2110,9 @@ def get_fixed_report_schema_prompt() -> str:
 - `Actionable Ideas` 可以高亮核心判断、趋势与催化逻辑，但不要高亮“继续观察 / 优先关注 / 跟踪”这类交易动作措辞
 - 应优先高亮：程度描述、核心结论、独特定位、趋势判断
 - 不要高亮：纯数字、普通描述性文字、纯ticker、一般事实名词
+- 空值规则：没有内容的数组字段返回 `[]`，字符串字段返回 `""`
+- 缺失值规则：不要返回 `null`、`None`、`N/A`、`未知`、`待定`
+- 禁止补写：不要补充 schema 之外的新字段，不要发明输入中不存在的观点、时间点、催化、数字或引用关系
 - 不要输出 HTML，不要输出 Markdown，不要发明额外顶层模块
 """
 
@@ -1802,6 +2131,19 @@ def render_list_html(items: List[Any], highlights: Optional[List[str]] = None) -
         rendered_items.append(f"<li>{escape_with_highlights(text, item_highlights)}</li>")
     li_items = "".join(rendered_items)
     return f"<ul>{li_items}</ul>"
+
+
+def render_detail_label(label: str) -> str:
+    return f'<h4 class="detail-label">{escape(label)}</h4>'
+
+
+def render_detail_copy(text: str, highlights: Optional[List[str]] = None) -> str:
+    return f'<p class="detail-copy">{escape_with_highlights(text, highlights)}</p>'
+
+
+def render_detail_list_html(items: List[Any], highlights: Optional[List[str]] = None) -> str:
+    html = render_list_html(items, highlights)
+    return re.sub(r"<(ul|ol)\b", r'<\1 class="detail-list"', html, count=1)
 
 
 def render_market_views_table(rows: List[Dict[str, str]]) -> str:
@@ -1944,27 +2286,27 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
     for index, coverage in enumerate(payload["core_events"], 1):
         body_parts.append(f"<h3>{index}. {escape(coverage['headline'])}</h3>")
         if coverage["core_facts"]:
-            body_parts.append("<p><strong>核心事实</strong></p>")
-            body_parts.append(render_list_html(coverage["core_facts"], coverage.get("core_fact_highlight_phrases")))
-        body_parts.append("<p><strong>市场怎么看</strong></p>")
+            body_parts.append(render_detail_label("核心事实"))
+            body_parts.append(render_detail_list_html(coverage["core_facts"], coverage.get("core_fact_highlight_phrases")))
+        body_parts.append(render_detail_label("市场怎么看"))
         if coverage["market_views"]:
             body_parts.append(render_market_views_table(coverage["market_views"]))
         elif coverage["market_take"]:
-            body_parts.append(render_list_html(coverage["market_take"], coverage["highlight_phrases"]))
+            body_parts.append(render_detail_list_html(coverage["market_take"], coverage["highlight_phrases"]))
         if coverage["action"]:
-            body_parts.append("<p><strong>投资启示</strong></p>")
-            body_parts.append(f'<p>{escape_with_highlights(coverage["action"], coverage.get("action_highlight_phrases"))}</p>')
+            body_parts.append(render_detail_label("投资启示"))
+            body_parts.append(render_detail_copy(coverage["action"], coverage.get("action_highlight_phrases")))
 
     body_parts.append('<div class="divider"></div>')
     body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["local_news_h2"]}</h2>')
     for index, item in enumerate(payload["local_news"], 1):
         body_parts.append(f"<h3>{index}. {escape(item['headline'])}</h3>")
-        body_parts.append("<p><strong>信号</strong></p>")
-        body_parts.append(f'<p>{escape_with_highlights(item["signal"], item.get("signal_highlight_phrases"))}</p>')
-        body_parts.append("<p><strong>为什么重要</strong></p>")
-        body_parts.append(f'<p>{escape_with_highlights(item["importance"], item.get("importance_highlight_phrases"))}</p>')
-        body_parts.append("<p><strong>Action</strong></p>")
-        body_parts.append(f'<p>{escape_with_highlights(item["action"], item.get("action_highlight_phrases"))}</p>')
+        body_parts.append(render_detail_label("信号"))
+        body_parts.append(render_detail_copy(item["signal"], item.get("signal_highlight_phrases")))
+        body_parts.append(render_detail_label("为什么重要"))
+        body_parts.append(render_detail_copy(item["importance"], item.get("importance_highlight_phrases")))
+        body_parts.append(render_detail_label("Action"))
+        body_parts.append(render_detail_copy(item["action"], item.get("action_highlight_phrases")))
 
     body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["peripheral_h2"]}</h2>')
     body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["peripheral_subsections"][0]}</h3>')
@@ -1980,7 +2322,7 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
     body_parts.append(render_list_html(payload["actionable_ideas"]["short_term"]))
     body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["actionable_labels"][1]}</h3>')
     body_parts.append(render_list_html(payload["actionable_ideas"]["medium_term"]))
-    body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["actionable_labels"][2]}</h3>')
+    body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["actionable_labels"][2]}</h2>')
     body_parts.append(render_catalysts_table(payload["actionable_ideas"]["catalysts"]))
     body_parts.append(f'<p><strong>{FIXED_REPORT_TEMPLATE["actionable_labels"][3]}:</strong> {escape(payload["actionable_ideas"]["bottom_line"])}</p>')
     return format_html_report(
@@ -1990,26 +2332,17 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
     )
 
 
-def analyze_batch_summary_with_llm(batch_emails: List[Dict], total_email_count: int, batch_index: int, batch_total: int) -> Dict:
+def analyze_batch_summary_with_llm(
+    batch_emails: List[Dict],
+    total_email_count: int,
+    batch_index: int,
+    batch_total: int,
+    routing_state: Optional[Dict[str, Any]] = None,
+) -> Dict:
     emails_text = build_emails_text(batch_emails, total_email_count, total_body_budget=MAX_PROMPT_BODY_CHARS // 2)
     batch_email_ids = ", ".join(str(email.get("_analysis_index")) for email in batch_emails)
 
-    system_prompt = f"""你是一位卖方邮件研究助理。你当前的任务不是直接写最终晨报，而是先把一个子批次邮件压缩成便于二次合并的结构化 JSON 摘要。
-
-{get_hf_role_guidance()}
-
-## 原则
-- 先区分事实、观点、传闻，再做摘要
-- 主语归因优先于表面语气词
-- 结构化信息优先于漂亮表述
-
-## 规则
-1. 只输出合法 JSON，不要 HTML，不要 Markdown，不要解释文字
-2. 必须使用简体中文
-3. 内容要极度精炼，只保留后续合并所需的信息
-4. 高频主题必须写明覆盖邮件编号和覆盖邮件数
-5. 同一主题下只保留最核心的事实、观点、交易含义
-6. 每个主题必须明确区分“事实主体”和“观点主体”，不能把转述者默认当作观点提出者
+    system_prompt = build_report_system_prompt(f"""{get_batch_summary_stage_rules()}
 
 ## JSON 结构
 {{
@@ -2021,6 +2354,9 @@ def analyze_batch_summary_with_llm(batch_emails: List[Dict], total_email_count: 
       "title": "主题名称",
       "email_ids": [1, 2],
       "coverage_count": 2,
+      "merge_key": "跨批次对齐键，尽量稳定，写成 `对象 | 事件/催化 | 方向`",
+      "time_horizon": "短期 / 中期 / 长期 / 未知",
+      "target_slot": "core_events / local_news / peripheral_intelligence / actionable_ideas",
       "fact_subject": "谁是客观事实的主体",
       "opinion_subject": "谁提出了观点；如果没有观点可填空字符串",
       "info_type": "事实 / 机构观点 / 外部引述 / 市场传闻",
@@ -2032,14 +2368,12 @@ def analyze_batch_summary_with_llm(batch_emails: List[Dict], total_email_count: 
   ]
 }}
 
-## 底线
+## 补充要求
+- 高频主题必须写明覆盖邮件编号和覆盖邮件数
+- 每个主题必须明确区分“事实主体”和“观点主体”，不能把转述者默认当作观点提出者
 - 如果邮件尾部是签名、免责声明、法律声明，不要纳入摘要
 - 只保留对最终 HF Morning Brief 有帮助的信息
-- “发件人/券商机构”不等于“正文里每一句话的观点主体”
-- 如果正文出现 `X says`、`according to X`、`reports suggest`、`媒体称`、`市场传闻`、`management said` 之类表述，必须把观点归给 X、媒体、市场或管理层，而不是默认归给发件机构
-- 带有“认为 / 预计 / 可能 / 或 / suggests / reportedly / rumor”色彩的内容，默认不是核心事实，除非邮件里给出了可验证的客观证据
-- 例如 `Shawn Kim says SRAM is a complement to HBM` 应写成 `Shawn Kim 认为...` 或 `邮件转述 Shawn Kim 的观点...`，不能写成 `MS认为...`，除非原文明确写的是 Morgan Stanley 的判断
-"""
+""")
 
     user_prompt = f"""请把下面这批邮件整理成结构化中间摘要，供后续二次合并。
 
@@ -2054,7 +2388,13 @@ def analyze_batch_summary_with_llm(batch_emails: List[Dict], total_email_count: 
 {emails_text}
 """
 
-    raw = generate_with_llm(system_prompt, user_prompt, emails=batch_emails)
+    raw = generate_with_llm(
+        system_prompt,
+        user_prompt,
+        emails=batch_emails,
+        routing_state=routing_state,
+        response_format=build_batch_summary_response_format(),
+    )
     parsed = parse_batch_summary_json(raw)
     parsed["batch_index"] = batch_index
     parsed["batch_total"] = batch_total
@@ -2065,27 +2405,14 @@ def merge_batch_summaries_with_llm(
     batch_summaries: List[Dict],
     total_email_count: int,
     source_emails: Optional[List[Dict]] = None,
+    routing_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     summaries_text = json.dumps(batch_summaries, ensure_ascii=False, indent=2)
 
-    system_prompt = f"""你是一位专业的对冲基金研究分析师，擅长把多个子批次摘要合并成一份固定模板晨报的结构化 JSON。
-
-{get_hf_role_guidance()}
-
-{get_report_prompt_governance()}
-
-## 合并任务
-你会收到若干份子批次摘要，这些摘要来自同一天的同一组 {total_email_count} 封卖方邮件。请完成以下工作：
-1. 合并表达不同但实质相同的主题
-2. 按合并后的覆盖邮件数排序，但不要在输出中显示覆盖数字
-3. 如果主题出现在多个批次中，合并其事实、观点与邮件覆盖面
-4. 外部引述、媒体消息、市场传闻必须保留真实主语和归因提醒
-5. 普通功能升级、一般性产品更新、没有交易含义的 trivial 变化默认忽略或显著降权
-6. Executive Summary 必须明确拆成“市场大背景”和“关键信号”
-7. 核心事实要尽量短，不要写成长段解释
+    system_prompt = build_report_system_prompt(f"""{get_merge_stage_rules(total_email_count)}
 
 {get_fixed_report_schema_prompt()}
-"""
+""")
 
     user_prompt = f"""请将以下结构化子批次摘要合并成最终中文晨报 JSON。
 
@@ -2097,7 +2424,12 @@ def merge_batch_summaries_with_llm(
 {summaries_text}
 """
 
-    raw = generate_with_llm(system_prompt, user_prompt)
+    raw = generate_with_llm(
+        system_prompt,
+        user_prompt,
+        routing_state=routing_state,
+        response_format=build_report_response_format(),
+    )
     return render_report_html(parse_report_payload_json(raw), source_emails=source_emails)
 
 
@@ -2208,6 +2540,7 @@ def call_llm_api(
     system_prompt: str,
     user_prompt: str,
     user_content_blocks: Optional[List[Dict[str, Any]]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     调用兼容 chat/completions 的大模型 API，返回文本结果或 None
@@ -2231,6 +2564,8 @@ def call_llm_api(
             {"role": "user", "content": user_message_content}
         ],
     }
+    if response_format and supports_openai_json_schema_response_format(api_config):
+        payload["response_format"] = response_format
 
     if is_openai_chat_api(api_config) and is_openai_gpt5_family(api_config):
         payload["max_completion_tokens"] = MAX_COMPLETION_TOKENS
@@ -2273,6 +2608,7 @@ def call_llm_api_with_retries(
     delay: float = 5.0,
     backoff: float = 2.0,
     user_content_blocks: Optional[List[Dict[str, Any]]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """对单个模型做有限重试，失败后交由上层切换备用模型。"""
     current_delay = delay
@@ -2286,6 +2622,7 @@ def call_llm_api_with_retries(
                 system_prompt,
                 user_prompt,
                 user_content_blocks=user_content_blocks,
+                response_format=response_format,
             )
             if html_content:
                 if attempt > 0:
@@ -2315,16 +2652,11 @@ def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
     """
     email_count = len(emails)
     email_batches = split_emails_for_analysis(emails)
+    routing_state = {"disabled_model_keys": set()}
 
     if len(email_batches) == 1:
         emails_text = build_emails_text(email_batches[0], email_count, total_body_budget=MAX_PROMPT_BODY_CHARS)
-        system_prompt = f"""你是一位专业的对冲基金研究分析师，擅长将卖方邮件转化为固定模板晨报的结构化 JSON。
-
-{get_hf_role_guidance()}
-
-{get_report_prompt_governance()}
-
-## 图片理解指引（重要！必须遵循）
+        system_prompt = build_report_system_prompt(f"""## 图片理解指引（重要！必须遵循）
 邮件中可能包含图片（图表、截图、照片等），请按以下规则理解和处理：
 
 1. **图表类图片**：
@@ -2346,7 +2678,7 @@ def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
    - 直接写出从图片中解读出的Insight
 
 {get_fixed_report_schema_prompt()}
-"""
+""")
 
         user_prompt = f"""请分析以下邮件，生成最终晨报 JSON。
 
@@ -2357,7 +2689,13 @@ def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
 邮件内容：
 {emails_text}"""
 
-        raw = generate_with_llm(system_prompt, user_prompt, emails=emails)
+        raw = generate_with_llm(
+            system_prompt,
+            user_prompt,
+            emails=emails,
+            routing_state=routing_state,
+            response_format=build_report_response_format(),
+        )
         html_content = render_report_html(parse_report_payload_json(raw), source_emails=emails)
         logger.info("✅ 大模型分析完成")
         return html_content
@@ -2372,6 +2710,7 @@ def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
                 total_email_count=email_count,
                 batch_index=idx,
                 batch_total=len(email_batches),
+                routing_state=routing_state,
             )
         )
 
@@ -2379,6 +2718,7 @@ def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
         batch_summaries,
         total_email_count=email_count,
         source_emails=emails,
+        routing_state=routing_state,
     )
     logger.info("✅ 大模型分析完成")
     return html_content
@@ -2508,7 +2848,7 @@ def normalize_legacy_label_boxes(body_content: str) -> str:
         content = (match.group(2) or "").strip()
         if label not in supported_labels or not content:
             return match.group(0)
-        return f"<p><strong>{label}</strong></p>\n{content}"
+        return f'<h4 class="detail-label">{label}</h4>\n{content}'
 
     previous = None
     normalized = body_content
@@ -2591,7 +2931,7 @@ def format_html_report(
 
 
 def normalize_subsection_headings(body_content: str) -> str:
-    """把模型生成的“粗体段落小标题”提升为 h3，减少样式漂移。"""
+    """只把白名单里的真正 subsection 提升标题，避免字段标签误升层级。"""
     if not body_content:
         return body_content
 
@@ -2604,13 +2944,10 @@ def normalize_subsection_headings(body_content: str) -> str:
         if not normalized:
             return match.group(0)
 
-        has_suffix_punct = raw_heading.endswith((':', '：'))
-        is_short_english_heading = bool(re.fullmatch(r"[A-Z][A-Za-z0-9/&,\-()' ]{2,79}", normalized))
-
-        if not has_suffix_punct and not is_short_english_heading:
+        if normalized not in SECTION_SUBHEADINGS:
             return match.group(0)
 
-        return f"<h3>{normalized}</h3>"
+        return f"<h2>{normalized}</h2>"
 
     return re.sub(
         r"<p>\s*<strong>(.*?)</strong>\s*</p>",
@@ -2654,10 +2991,10 @@ def normalize_standalone_labels(body_content: str) -> str:
         raw_label = re.sub(r"<[^>]+>", "", match.group(1)).strip()
         normalized = raw_label.rstrip(":：").strip()
         if normalized in SECTION_SUBHEADINGS:
-            return f"<h3>{normalized}</h3>"
+            return f"<h2>{normalized}</h2>"
         if normalized in TIME_HORIZON_SUBHEADINGS:
             return f'<h3 class="horizon-heading">{normalized}</h3>'
-        if normalized in STANDALONE_SUBHEADINGS:
+        if normalized in STANDALONE_SUBHEADINGS or normalized in FIXED_DETAIL_LABELS:
             return f"<h4>{normalized}</h4>"
         return match.group(0)
 
@@ -2680,7 +3017,7 @@ def normalize_existing_heading_tags(body_content: str) -> str:
         normalized = raw_label.rstrip(":：").strip()
 
         if normalized in SECTION_SUBHEADINGS:
-            return f"<h3>{normalized}</h3>"
+            return f"<h2>{normalized}</h2>"
         if normalized in TIME_HORIZON_SUBHEADINGS:
             return f'<h3 class="horizon-heading">{normalized}</h3>'
         if normalized in STANDALONE_SUBHEADINGS or normalized in SEMANTIC_CALLOUT_RULES:
@@ -2728,7 +3065,7 @@ def normalize_semantic_callout_blocks(body_content: str) -> str:
         label = match.group(1).strip()
         content = match.group(2).strip()
         if label in FIXED_DETAIL_LABELS:
-            return f"<p><strong>{label}</strong></p>\n{content}"
+            return f'<h4 class="detail-label">{label}</h4>\n{content}'
         return build_semantic_callout(label, content) or match.group(0)
 
     previous = None
@@ -2758,7 +3095,7 @@ def normalize_inline_labeled_paragraphs(body_content: str) -> str:
             return match.group(0)
 
         if label in FIXED_DETAIL_LABELS:
-            return f"<p><strong>{label}</strong></p>\n<p>{content}</p>"
+            return f'<h4 class="detail-label">{label}</h4>\n<p class="detail-copy">{content}</p>'
 
         semantic_callout = build_semantic_callout(label, content)
         if semantic_callout:
