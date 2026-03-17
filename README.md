@@ -27,9 +27,7 @@
 
 ## 报告内容
 
-基于角色指南（Persona）生成高效简炼的高效简炼：
-
- - 角色指南(Persona)详见 [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
+基于角色指南（Persona）生成高效简炼的高效简炼：详见 [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
 
 
 ##### 报告结构 #####
