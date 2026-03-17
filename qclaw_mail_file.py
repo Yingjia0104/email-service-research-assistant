@@ -916,6 +916,50 @@ def derive_highlight_phrases(text: str, limit: int = 4) -> List[str]:
     return normalized
 
 
+def derive_stance_highlight_phrases(text: str, limit: int = 2) -> List[str]:
+    """只为市场观点里的 stance 提取“特别鲜明”的立场短语。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+
+    strong_markers = (
+        "强烈看多",
+        "强烈看空",
+        "明确看多",
+        "明确看空",
+        "坚定看多",
+        "坚定看空",
+        "极度乐观",
+        "极度悲观",
+        "显著转向",
+        "明显转向",
+        "大幅上修",
+        "大幅下修",
+        "强烈推荐",
+        "明确转向",
+        "超配",
+        "低配",
+        "overweight",
+        "underweight",
+        "strong buy",
+        "strong sell",
+        "bullish",
+        "bearish",
+    )
+
+    results = []
+    lowered = raw.lower()
+    for marker in strong_markers:
+        if marker.lower() in lowered:
+            results.append(marker if re.search(r"[\u4e00-\u9fff]", marker) else raw)
+            break
+
+    if not results:
+        return []
+
+    return normalize_string_list(results, limit=limit)
+
+
 def merge_highlight_phrases(*sources: Any, limit: int = 6) -> List[str]:
     """优先使用模型给的高亮短语，不足时再用规则补齐。"""
     result = []
@@ -1102,19 +1146,29 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not headline:
             continue
 
+        core_facts = normalize_string_list(item.get("core_facts") or item.get("facts"), limit=4)
+        action_text = str(item.get("action") or item.get("investment_takeaway") or item.get("investment_implication") or "").strip()
+        item_highlights = item.get("highlight_phrases") or item.get("highlights")
+
         normalized_coverage.append({
             "headline": headline,
             "priority_rank": coerce_int(item.get("priority_rank"), 9999),
             "coverage_count": coerce_int(item.get("coverage_count"), 0),
             "global_score": coerce_float(item.get("global_score"), 0.0),
             "source_topics": normalize_string_list(item.get("source_topics") or item.get("email_ids"), limit=8),
-            "core_facts": normalize_string_list(item.get("core_facts") or item.get("facts"), limit=4),
+            "core_facts": core_facts,
             "market_views": [
                 {
                     "source": str(row.get("source") or row.get("观点来源") or "").strip(),
                     "stance": str(row.get("stance") or row.get("立场") or "").strip(),
                     "thesis": str(row.get("thesis") or row.get("core_argument") or row.get("核心论点") or "").strip(),
-                    "highlight_phrases": merge_highlight_phrases(
+                    "stance_highlight_phrases": merge_highlight_phrases(
+                        row.get("stance_highlight_phrases"),
+                        derive_stance_highlight_phrases(row.get("stance") or row.get("立场") or ""),
+                        limit=2,
+                    ),
+                    "thesis_highlight_phrases": merge_highlight_phrases(
+                        row.get("thesis_highlight_phrases"),
                         row.get("highlight_phrases") or row.get("highlights"),
                         derive_highlight_phrases(row.get("thesis") or row.get("core_argument") or row.get("核心论点") or ""),
                         limit=4,
@@ -1130,12 +1184,23 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             ],
             "market_take": normalize_string_list(item.get("market_take") or item.get("market_takeaways"), limit=4),
             "importance": str(item.get("importance") or item.get("why_it_matters") or "").strip(),
-            "action": str(item.get("action") or item.get("investment_takeaway") or item.get("investment_implication") or "").strip(),
-            "highlight_phrases": merge_highlight_phrases(
-                item.get("highlight_phrases") or item.get("highlights"),
+            "action": action_text,
+            "core_fact_highlight_phrases": merge_highlight_phrases(
+                item.get("core_fact_highlight_phrases"),
+                derive_highlight_phrases(" ".join(core_facts), limit=4),
+                limit=4,
+            ),
+            "action_highlight_phrases": merge_highlight_phrases(
+                item.get("action_highlight_phrases"),
+                item_highlights,
                 derive_highlight_phrases(headline, limit=2),
-                derive_highlight_phrases(item.get("action") or item.get("investment_takeaway") or item.get("investment_implication") or "", limit=3),
-                derive_highlight_phrases(" ".join(item.get("core_facts") or item.get("facts") or []), limit=4),
+                derive_highlight_phrases(action_text, limit=3),
+                limit=6,
+            ),
+            "highlight_phrases": merge_highlight_phrases(
+                item_highlights,
+                derive_highlight_phrases(headline, limit=2),
+                derive_highlight_phrases(action_text, limit=3),
                 limit=6,
             ),
             "attribution_note": str(item.get("attribution_note") or item.get("source_note") or "").strip(),
@@ -1158,17 +1223,37 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         headline = str(item.get("headline") or item.get("title") or "").strip()
         if not headline:
             continue
+        signal_text = str(item.get("signal") or "").strip()
+        importance_text = str(item.get("importance") or item.get("why_it_matters") or "").strip()
+        action_text = str(item.get("action") or "").strip()
+        item_highlights = item.get("highlight_phrases") or item.get("highlights")
         normalized_local_news.append({
             "headline": headline,
             "priority_rank": coerce_int(item.get("priority_rank"), 9999),
-            "signal": str(item.get("signal") or "").strip(),
-            "importance": str(item.get("importance") or item.get("why_it_matters") or "").strip(),
-            "action": str(item.get("action") or "").strip(),
+            "signal": signal_text,
+            "importance": importance_text,
+            "action": action_text,
+            "signal_highlight_phrases": merge_highlight_phrases(
+                item.get("signal_highlight_phrases"),
+                derive_highlight_phrases(signal_text, limit=3),
+                limit=4,
+            ),
+            "importance_highlight_phrases": merge_highlight_phrases(
+                item.get("importance_highlight_phrases"),
+                derive_highlight_phrases(importance_text, limit=3),
+                limit=4,
+            ),
+            "action_highlight_phrases": merge_highlight_phrases(
+                item.get("action_highlight_phrases"),
+                item_highlights,
+                derive_highlight_phrases(action_text, limit=3),
+                limit=4,
+            ),
             "highlight_phrases": merge_highlight_phrases(
-                item.get("highlight_phrases") or item.get("highlights"),
+                item_highlights,
                 derive_highlight_phrases(headline, limit=2),
-                derive_highlight_phrases(item.get("signal") or "", limit=3),
-                derive_highlight_phrases(item.get("action") or "", limit=3),
+                derive_highlight_phrases(signal_text, limit=3),
+                derive_highlight_phrases(action_text, limit=3),
                 limit=5,
             ),
         })
@@ -1215,9 +1300,9 @@ def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             "headline": headline,
             "priority_rank": coerce_int(item.get("priority_rank"), 9999),
             "bullets": bullets,
-            "highlight_phrases": merge_highlight_phrases(
+            "bullet_highlight_phrases": merge_highlight_phrases(
+                item.get("bullet_highlight_phrases"),
                 item.get("highlight_phrases") or item.get("highlights"),
-                derive_highlight_phrases(headline, limit=2),
                 derive_highlight_phrases(" ".join(bullets), limit=4),
                 limit=5,
             ),
@@ -1422,7 +1507,8 @@ def get_fixed_report_schema_prompt() -> str:
           "source": "观点来源",
           "stance": "立场",
           "thesis": "核心论点",
-          "highlight_phrases": ["这一行里最值得高亮的1-3个短语，可选"]
+          "stance_highlight_phrases": ["可选：只有立场特别鲜明时才返回，如'强烈看多'"],
+          "thesis_highlight_phrases": ["这一行核心论点里最值得高亮的1-3个短语，可选"]
         }}
       ],
       "action": "投资启示，1-2句",
@@ -1506,6 +1592,8 @@ def get_fixed_report_schema_prompt() -> str:
 - `core_events`、`Actionable Ideas`、`catalysts` 必须显式给出 `priority_rank / coverage_count / global_score`，本地会据此再做一次排序校验
 - `Actionable Ideas` 与 `catalysts` 应尽量给出 `linked_core_event_headlines`，引用它们所依赖的 `core_events.headline`，本地会把这些引用映射成可解释的 `linked_core_event_ids`
 - `highlight` 属于结构字段：你只需指出哪些短语需要强调，本地模板会统一渲染高亮样式
+- `market_views.source` 不要高亮；`market_views.stance` 只有在态度特别鲜明时才高亮；`market_views.thesis` 单独返回高亮短语
+- `Actionable Ideas` 可以高亮核心判断、趋势与催化逻辑，但不要高亮“继续观察 / 优先关注 / 跟踪”这类交易动作措辞
 - 应优先高亮：程度描述、核心结论、独特定位、趋势判断
 - 不要高亮：纯数字、普通描述性文字、纯ticker、一般事实名词
 - 不要输出 HTML，不要输出 Markdown，不要发明额外顶层模块
@@ -1536,9 +1624,9 @@ def render_market_views_table(rows: List[Dict[str, str]]) -> str:
     for row in rows:
         body_rows.append(
             "<tr>"
-            f"<td><strong>{escape_with_highlights(row.get('source', ''), row.get('highlight_phrases'))}</strong></td>"
-            f"<td>{escape_with_highlights(row.get('stance', ''), row.get('highlight_phrases'))}</td>"
-            f"<td>{escape_with_highlights(row.get('thesis', ''), row.get('highlight_phrases'))}</td>"
+            f"<td><strong>{escape(row.get('source', ''))}</strong></td>"
+            f"<td>{escape_with_highlights(row.get('stance', ''), row.get('stance_highlight_phrases'))}</td>"
+            f"<td>{escape_with_highlights(row.get('thesis', ''), row.get('thesis_highlight_phrases'))}</td>"
             "</tr>"
         )
     return (
@@ -1669,7 +1757,7 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
         body_parts.append(f"<h3>{index}. {escape(coverage['headline'])}</h3>")
         if coverage["core_facts"]:
             body_parts.append("<p><strong>核心事实</strong></p>")
-            body_parts.append(render_list_html(coverage["core_facts"], coverage["highlight_phrases"]))
+            body_parts.append(render_list_html(coverage["core_facts"], coverage.get("core_fact_highlight_phrases")))
         body_parts.append("<p><strong>市场怎么看</strong></p>")
         if coverage["market_views"]:
             body_parts.append(render_market_views_table(coverage["market_views"]))
@@ -1677,18 +1765,18 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
             body_parts.append(render_list_html(coverage["market_take"], coverage["highlight_phrases"]))
         if coverage["action"]:
             body_parts.append("<p><strong>投资启示</strong></p>")
-            body_parts.append(f'<p>{escape_with_highlights(coverage["action"], coverage["highlight_phrases"])}</p>')
+            body_parts.append(f'<p>{escape_with_highlights(coverage["action"], coverage.get("action_highlight_phrases"))}</p>')
 
     body_parts.append('<div class="divider"></div>')
     body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["local_news_h2"]}</h2>')
     for index, item in enumerate(payload["local_news"], 1):
         body_parts.append(f"<h3>{index}. {escape(item['headline'])}</h3>")
         body_parts.append("<p><strong>信号</strong></p>")
-        body_parts.append(f'<p>{escape_with_highlights(item["signal"], item["highlight_phrases"])}</p>')
+        body_parts.append(f'<p>{escape_with_highlights(item["signal"], item.get("signal_highlight_phrases"))}</p>')
         body_parts.append("<p><strong>为什么重要</strong></p>")
-        body_parts.append(f'<p>{escape_with_highlights(item["importance"], item["highlight_phrases"])}</p>')
+        body_parts.append(f'<p>{escape_with_highlights(item["importance"], item.get("importance_highlight_phrases"))}</p>')
         body_parts.append("<p><strong>Action</strong></p>")
-        body_parts.append(f'<p>{escape_with_highlights(item["action"], item["highlight_phrases"])}</p>')
+        body_parts.append(f'<p>{escape_with_highlights(item["action"], item.get("action_highlight_phrases"))}</p>')
 
     body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["peripheral_h2"]}</h2>')
     body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["peripheral_subsections"][0]}</h3>')
@@ -1696,8 +1784,8 @@ def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[L
     body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["peripheral_subsections"][1]}</h3>')
     for item in payload["peripheral_intelligence"]["cross_market_signals"]:
         if item["headline"]:
-            body_parts.append(f'<p><strong>{escape_with_highlights(item["headline"], item["highlight_phrases"])}</strong></p>')
-        body_parts.append(render_list_html(item["bullets"], item["highlight_phrases"]))
+            body_parts.append(f'<p><strong>{escape(item["headline"])}</strong></p>')
+        body_parts.append(render_list_html(item["bullets"], item.get("bullet_highlight_phrases")))
 
     body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["actionable_h2"]}</h2>')
     body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["actionable_labels"][0]}</h3>')

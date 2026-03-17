@@ -8,13 +8,15 @@ api_key: "your-secret-key"
 kimi:
   api_key: "your-kimi-api-key"
   base_url: "https://api.moonshot.cn/v1"
-  model: "moonshot-v1-128k"
+  model: "kimi-k2.5"
+  supports_vision: true
 
 # 备用 API 配置（当前API余额不足时自动切换）
 kimi_backup:
   api_key: "your-backup-api-key"
-  base_url: "https://api.moonshot.ai/v1"
+  base_url: "https://api.moonshot.cn/v1"
   model: "kimi-k2.5"
+  supports_vision: true
 
 # 发送方 (Gmail/Outlook SMTP) - 完整闭环时配置；通常可与 IMAP 使用同一个邮箱
 smtp:

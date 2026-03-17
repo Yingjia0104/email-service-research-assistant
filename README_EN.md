@@ -14,7 +14,7 @@ Email Reception → Smart Parsing → AI Analysis → Insight Extraction → Rep
 - 📊 **Report Generation**: Generate professional HF Morning Brief format reports
 - 📤 **Auto Send**: Auto-send reports via SMTP to designated email
 - 🗃️ **SQLite State Management**: SQLite is the single source of truth for dedupe, pending emails, and sent-report history
-- 🧹 **Context Optimization**: Automatically trims signatures/disclaimers, strips inline image payloads, and bounds prompt size
+- 🧹 **Context Optimization**: Automatically trims signatures/disclaimers, strips inline image/base64 noise, and sends image attachments through multimodal input
 - 🔀 **Fault-Tolerant Analysis**: Primary model short-retries, then falls back to backup model; long batches are split and merged
 
 ## Report Content
@@ -152,10 +152,10 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 
 ### Recommended LLM
 
-Use Kimi series models (e.g., `kimi-k2.5` or `moonshot-v1-128k`):
+Use a Kimi model that has been validated in this project for multimodal runs (the default example is `kimi-k2.5`):
 
 - **Long Context**: Strong fit for multiple emails and long attachments; this project still actively sanitizes, trims, and splits input for more stable output
-- **Multimodal Understanding**: Useful for charts and screenshots; the default flow currently preserves image metadata/context instead of inlining large image payloads
+- **Multimodal Understanding**: Image attachments are now sent as multimodal content blocks instead of being reduced to filename/size metadata only
 
 ## Security Notes
 
@@ -217,6 +217,7 @@ A: By default, the system treats “15 minutes before the US market opens” as 
 - Idempotency: no re-analysis and no duplicate report generation when there are no new pending emails
 - Real attachment tests completed for `.txt`, `.pdf`, and images
 - Real delivery tests completed for both Gmail and Outlook whitelist senders
+- `kimi-k2.5 + supports_vision: true` has now been validated end-to-end for multimodal runs: both image attachments and inline-body images were converted into multimodal inputs and successfully produced/sent a report
 - Backup-model fallback verified: the system can switch to `kimi_backup` when the primary model fails
 - `early daily` verified: once all expected whitelist senders have arrived, `daily` is sent before the DDL
 - `supplement` verified: after `daily` is sent early, new whitelist mail remains `pending` first and is later sent separately during the supplement window

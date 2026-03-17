@@ -65,6 +65,126 @@ config = load_config()
 
 
 background_tasks = []
+analysis_task_lock = asyncio.Lock()
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif')
+MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
+
+
+def _extract_attachment_bytes(att):
+    """统一提取附件二进制。"""
+    if hasattr(att, "payload") and isinstance(att.payload, bytes):
+        return att.payload
+    if hasattr(att, "data") and isinstance(att.data, bytes):
+        return att.data
+    return None
+
+
+def _build_attachment_records(msg):
+    """提取附件记录；图片默认保留 data URL 供多模态模型直接使用。"""
+    attachment_contents = []
+    embedded_images = []
+    attachment_records = []
+
+    if not msg.attachments:
+        return attachment_contents, embedded_images, attachment_records
+
+    for att in msg.attachments:
+        if not att.filename:
+            continue
+
+        filename = att.filename
+        lower_filename = filename.lower()
+        content_type = getattr(att, "content_type", "") or "application/octet-stream"
+
+        try:
+            att_data = _extract_attachment_bytes(att)
+            if not att_data:
+                continue
+
+            is_image = content_type.startswith("image/") or any(lower_filename.endswith(ext) for ext in IMAGE_EXTENSIONS)
+            attachment_record = {
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(att_data),
+                "kind": "image" if is_image else "file",
+            }
+
+            if is_image:
+                if len(att_data) <= MAX_MULTIMODAL_IMAGE_BYTES:
+                    attachment_record["data_url"] = (
+                        f"data:{content_type};base64,{base64.b64encode(att_data).decode('ascii')}"
+                    )
+                    attachment_record["vision_ready"] = True
+                else:
+                    attachment_record["vision_ready"] = False
+                    attachment_record["vision_skip_reason"] = (
+                        f"image_too_large>{MAX_MULTIMODAL_IMAGE_BYTES}"
+                    )
+
+                embedded_images.append({
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size": len(att_data),
+                    "vision_ready": attachment_record.get("vision_ready", False),
+                })
+                attachment_records.append(attachment_record)
+                continue
+
+            att_text = ""
+            if lower_filename.endswith('.msg'):
+                import extract_msg
+                from io import BytesIO
+                msg_file = extract_msg.Message(BytesIO(att_data))
+                att_text = msg_file.body or ""
+
+            elif lower_filename.endswith('.pdf'):
+                try:
+                    import PyPDF2
+                    from io import BytesIO
+                    pdf_reader = PyPDF2.PdfReader(BytesIO(att_data))
+                    for page in pdf_reader.pages:
+                        att_text += page.extract_text() or ""
+                except Exception as e:
+                    logger.warning(f"PDF解析失败 {filename}: {e}")
+
+            elif lower_filename.endswith(('.docx', '.doc')):
+                try:
+                    import docx
+                    from io import BytesIO
+                    doc = docx.Document(BytesIO(att_data))
+                    for para in doc.paragraphs:
+                        att_text += para.text + "\n"
+                except Exception as e:
+                    logger.warning(f"Word解析失败 {filename}: {e}")
+
+            elif lower_filename.endswith('.txt'):
+                try:
+                    att_text = att_data.decode('utf-8', errors='ignore')
+                except Exception:
+                    att_text = ""
+
+            elif lower_filename.endswith('.eml'):
+                try:
+                    from email import policy
+                    from email.parser import BytesParser
+                    nested_msg = BytesParser(policy=policy.default).parsebytes(att_data)
+                    att_text = nested_msg.body or ""
+                except Exception as e:
+                    logger.warning(f"EML解析失败 {filename}: {e}")
+
+            if att_text and att_text.strip():
+                attachment_contents.append({
+                    "filename": filename,
+                    "content": att_text.strip()
+                })
+                attachment_record["extracted_text"] = att_text.strip()
+
+            attachment_records.append(attachment_record)
+        except Exception as e:
+            logger.warning(f"附件解析失败 {filename}: {e}")
+            continue
+
+    return attachment_contents, embedded_images, attachment_records
 
 
 def get_message_local_date(msg_datetime, local_tz):
@@ -304,93 +424,7 @@ def get_emails(
                 body = msg.text or msg.html or ""
 
                 # ============ 附件解析 ============
-                attachment_contents = []
-                embedded_images = []  # 附件中的图片元数据
-
-                # 支持的图片格式
-                IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif')
-
-                if msg.attachments:
-                    for att in msg.attachments:
-                        if not att.filename:
-                            continue
-
-                        filename = att.filename.lower()
-
-                        try:
-                            # 获取附件数据
-                            att_data = None
-                            if hasattr(att, 'payload') and isinstance(att.payload, bytes):
-                                att_data = att.payload
-                            elif hasattr(att, 'data'):
-                                att_data = att.data
-
-                            if not att_data:
-                                continue
-
-                            # 检查是否是图片附件
-                            is_image = any(filename.endswith(ext) for ext in IMAGE_EXTENSIONS)
-
-                            if is_image:
-                                embedded_images.append({
-                                    "filename": att.filename,
-                                    "content_type": getattr(att, "content_type", "") or "image/*",
-                                    "size": len(att_data),
-                                })
-                                continue
-
-                            # 文本类附件解析
-                            att_text = ""
-                            if filename.endswith('.msg'):
-                                import extract_msg
-                                from io import BytesIO
-                                msg_file = extract_msg.Message(BytesIO(att_data))
-                                att_text = msg_file.body or ""
-
-                            elif filename.endswith('.pdf'):
-                                try:
-                                    import PyPDF2
-                                    from io import BytesIO
-                                    pdf_reader = PyPDF2.PdfReader(BytesIO(att_data))
-                                    for page in pdf_reader.pages:
-                                        att_text += page.extract_text() or ""
-                                except Exception as e:
-                                    logger.warning(f"PDF解析失败 {att.filename}: {e}")
-
-                            elif filename.endswith(('.docx', '.doc')):
-                                try:
-                                    import docx
-                                    from io import BytesIO
-                                    doc = docx.Document(BytesIO(att_data))
-                                    for para in doc.paragraphs:
-                                        att_text += para.text + "\n"
-                                except Exception as e:
-                                    logger.warning(f"Word解析失败 {att.filename}: {e}")
-
-                            elif filename.endswith('.txt'):
-                                try:
-                                    att_text = att_data.decode('utf-8', errors='ignore')
-                                except:
-                                    pass
-
-                            elif filename.endswith('.eml'):
-                                try:
-                                    from email import policy
-                                    from email.parser import BytesParser
-                                    nested_msg = BytesParser(policy=policy.default).parsebytes(att_data)
-                                    att_text = nested_msg.body or ""
-                                except Exception as e:
-                                    logger.warning(f"EML解析失败 {att.filename}: {e}")
-
-                            if att_text and att_text.strip():
-                                attachment_contents.append({
-                                    "filename": att.filename,
-                                    "content": att_text.strip()
-                                })
-
-                        except Exception as e:
-                            logger.warning(f"附件解析失败 {att.filename}: {e}")
-                            continue
+                attachment_contents, embedded_images, attachment_records = _build_attachment_records(msg)
 
                 # 合并正文和附件内容
                 combined_body = body or ""
@@ -399,13 +433,14 @@ def get_emails(
                     for att in attachment_contents:
                         combined_body += f"\n【附件: {att['filename']}】\n{att['content']}\n"
 
-                # 图片附件只保留元数据，避免把 base64 大块文本塞进模型上下文
+                # 图片附件元数据仍保留在正文中，真实图片会通过 attachments 走多模态分析链路
                 if embedded_images:
                     combined_body += "\n\n--- 附件图片 ---\n"
                     for img in embedded_images:
+                        vision_status = "将直接送入多模态模型" if img.get("vision_ready") else "仅保留元数据（图片过大）"
                         combined_body += (
                             f"\n【图片附件: {img['filename']}】"
-                            f" 类型: {img['content_type']}, 大小: {img['size']} bytes\n"
+                            f" 类型: {img['content_type']}, 大小: {img['size']} bytes, 处理方式: {vision_status}\n"
                         )
 
                 emails.append({
@@ -418,7 +453,8 @@ def get_emails(
                     "subject": msg.subject,
                     "date": str(msg.date) if msg.date else "",
                     "preview": (combined_body or "")[:200],
-                    "body": combined_body
+                    "body": combined_body,
+                    "attachments": json.dumps(attachment_records, ensure_ascii=False) if attachment_records else None,
                 })
             return {"success": True, "emails": emails, "total": len(emails)}
     except Exception as e:
@@ -623,14 +659,22 @@ def _fetch_emails_for_db_sync(host: str, email_addr: str, email_pass: str, allow
             if not should_accept_sender(from_addr, allowed_senders):
                 continue
 
-            attachments = []
-            if msg.attachments:
-                for att in msg.attachments:
-                    attachments.append({
-                        "filename": att.filename,
-                        "content_type": att.content_type,
-                        "size": len(att.payload) if getattr(att, "payload", None) else 0,
-                    })
+            attachment_contents, embedded_images, attachment_records = _build_attachment_records(msg)
+
+            combined_body = msg.html or msg.text or ""
+            if attachment_contents:
+                combined_body += "\n\n--- 附件内容 ---\n"
+                for att in attachment_contents:
+                    combined_body += f"\n【附件: {att['filename']}】\n{att['content']}\n"
+
+            if embedded_images:
+                combined_body += "\n\n--- 附件图片 ---\n"
+                for img in embedded_images:
+                    vision_status = "将直接送入多模态模型" if img.get("vision_ready") else "仅保留元数据（图片过大）"
+                    combined_body += (
+                        f"\n【图片附件: {img['filename']}】"
+                        f" 类型: {img['content_type']}, 大小: {img['size']} bytes, 处理方式: {vision_status}\n"
+                    )
 
             emails.append({
                 "account_email": email_addr,
@@ -641,8 +685,8 @@ def _fetch_emails_for_db_sync(host: str, email_addr: str, email_pass: str, allow
                 "to": str(msg.to),
                 "subject": msg.subject,
                 "date": msg.date.isoformat() if msg.date else "",
-                "body": msg.html or msg.text or "",
-                "attachments": json.dumps(attachments) if attachments else None,
+                "body": combined_body,
+                "attachments": json.dumps(attachment_records, ensure_ascii=False) if attachment_records else None,
             })
 
             if len(emails) >= limit:
@@ -799,28 +843,21 @@ async def trigger_supplement_analysis(new_emails_count: int):
     if new_emails_count == 0:
         return
 
+    if analysis_task_lock.locked():
+        print("   ⏭️ 当前已有分析任务运行中，跳过本次 supplement")
+        return
+
     # 检查是否有待处理邮件
     pending_emails = email_db.get_pending_emails(limit=50)
     if not pending_emails:
         print("   📭 没有待处理的邮件，跳过补充分析")
         return
 
-    # 检查最近一次发送是否是补充分析（避免短时间内重复发送）
-    recent_sent = email_db.get_sent_reports(limit=1)
-    if recent_sent:
-        last_sent = recent_sent[0].get("sent_at", "")
-        if last_sent:
-            from datetime import timedelta
-            try:
-                last_sent_time = datetime.fromisoformat(last_sent)
-                if last_sent_time.tzinfo is None:
-                    last_sent_time = BJT.localize(last_sent_time)
-                if datetime.now(BJT) - last_sent_time.astimezone(BJT) < timedelta(hours=1):
-                    print("   ⏭️ 1小时内已发送过报告，跳过补充分析")
-                    return
-            except Exception:
-                print("   ⏭️ 1小时内已发送过报告，跳过补充分析")
-                return
+    # 只对 supplement 自己做节流，避免刚发完 daily 就把应发的补充报告也拦掉
+    recent_supplement = email_db.get_recent_successful_report(report_type="supplement", within_hours=1)
+    if recent_supplement:
+        print("   ⏭️ 1小时内已发送过 supplement，跳过本次补充分析")
+        return
 
     print("\n" + "="*50)
     print("📈 检测到开盘期间新邮件，触发补充分析！")
@@ -829,26 +866,31 @@ async def trigger_supplement_analysis(new_emails_count: int):
 
     # 调用 qclaw_mail_file 的补充分析模式
     import subprocess
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["python3", os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py"), "--analyze", "--supplement"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=os.path.dirname(__file__),
-        )
-        print(result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
-    except subprocess.TimeoutExpired:
-        print("❌ 补充分析超时")
-    except Exception as e:
-        print(f"❌ 补充分析失败: {e}")
+    async with analysis_task_lock:
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["python3", os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py"), "--analyze", "--supplement"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=os.path.dirname(__file__),
+            )
+            print(result.stdout)
+            if result.stderr:
+                print("STDERR:", result.stderr)
+        except subprocess.TimeoutExpired:
+            print("❌ 补充分析超时")
+        except Exception as e:
+            print(f"❌ 补充分析失败: {e}")
 
 
 async def trigger_daily_analysis(reason: str):
     """触发 daily 分析。"""
+    if analysis_task_lock.locked():
+        print(f"   ⏭️ 当前已有分析任务运行中，跳过 daily ({reason})")
+        return
+
     pending = email_db.get_pending_emails(limit=1)
     if not pending:
         print("   📭 没有待处理邮件，跳过 daily 分析")
@@ -859,22 +901,30 @@ async def trigger_daily_analysis(reason: str):
     print("=" * 50)
 
     import subprocess
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["python3", os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py"), "--analyze"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=os.path.dirname(__file__),
-        )
-        print(result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
-    except subprocess.TimeoutExpired:
-        print("❌ daily 分析超时")
-    except Exception as e:
-        print(f"❌ daily 分析失败: {e}")
+    async with analysis_task_lock:
+        if has_daily_report_sent_today():
+            print(f"   ⏭️ 今日已发送 daily 报告，跳过 ({reason})")
+            return
+        pending = email_db.get_pending_emails(limit=1)
+        if not pending:
+            print("   📭 没有待处理邮件，跳过 daily 分析")
+            return
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["python3", os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py"), "--analyze"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=os.path.dirname(__file__),
+            )
+            print(result.stdout)
+            if result.stderr:
+                print("STDERR:", result.stderr)
+        except subprocess.TimeoutExpired:
+            print("❌ daily 分析超时")
+        except Exception as e:
+            print(f"❌ daily 分析失败: {e}")
 
 
 async def scheduled_analysis_loop():

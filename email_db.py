@@ -5,7 +5,7 @@
 import sqlite3
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 BJT = pytz.timezone('Asia/Shanghai')
@@ -185,6 +185,34 @@ def mark_processed(uids: list):
     conn.close()
 
 
+def mark_processed_scoped(uids: list, account_email: str = None, folder: str = None):
+    """按 UID + 可选邮箱作用域标记邮件为已处理。"""
+    if not uids:
+        return
+
+    conn = _connect()
+    cursor = conn.cursor()
+
+    placeholders = ",".join(["?"] * len(uids))
+    query = f"""
+        UPDATE emails
+        SET status = 'processed', processed_at = ?
+        WHERE uid IN ({placeholders})
+    """
+    params = [datetime.now(BJT).isoformat(), *uids]
+
+    if account_email is not None:
+        query += " AND account_email = ?"
+        params.append(account_email.strip().lower())
+    if folder is not None:
+        query += " AND folder = ?"
+        params.append((folder or "INBOX").strip() or "INBOX")
+
+    cursor.execute(query, tuple(params))
+    conn.commit()
+    conn.close()
+
+
 def mark_processed_by_local_ids(local_ids: list):
     """按本地 ID 标记邮件为已处理。"""
     local_ids = [local_id for local_id in (local_ids or []) if local_id is not None]
@@ -243,6 +271,31 @@ def get_today_processed_uids() -> set:
         AND substr(processed_at, 1, 10) = ?
     """, (today_str,))
 
+    uids = {row[0] for row in cursor.fetchall() if row[0]}
+    conn.close()
+    return uids
+
+
+def get_today_processed_uids_scoped(account_email: str = None, folder: str = None) -> set:
+    """获取今天已处理的邮件 UID，可按邮箱作用域过滤。"""
+    conn = _connect()
+    cursor = conn.cursor()
+    today_str = datetime.now(BJT).strftime("%Y-%m-%d")
+
+    query = """
+        SELECT uid FROM emails
+        WHERE status = 'processed'
+        AND substr(processed_at, 1, 10) = ?
+    """
+    params = [today_str]
+    if account_email is not None:
+        query += " AND account_email = ?"
+        params.append(account_email.strip().lower())
+    if folder is not None:
+        query += " AND folder = ?"
+        params.append((folder or "INBOX").strip() or "INBOX")
+
+    cursor.execute(query, tuple(params))
     uids = {row[0] for row in cursor.fetchall() if row[0]}
     conn.close()
     return uids
@@ -378,6 +431,48 @@ def get_sent_reports(limit: int = 10) -> list:
 
     conn.close()
     return results
+
+
+def get_recent_successful_report(report_type: str = None, within_hours: int = None) -> dict:
+    """获取最近一条成功发送记录，可按类型和时间窗口过滤。"""
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = """
+        SELECT *
+        FROM sent_reports
+        WHERE status = 'success'
+    """
+    params = []
+
+    if report_type:
+        query += " AND report_type = ?"
+        params.append(report_type)
+
+    if within_hours is not None:
+        threshold = datetime.now(BJT) - timedelta(hours=within_hours)
+        query += " AND sent_at >= ?"
+        params.append(threshold.isoformat())
+
+    query += " ORDER BY sent_at DESC LIMIT 1"
+    cursor.execute(query, tuple(params))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "id": row["id"],
+        "email_local_ids": row["email_local_ids"],
+        "email_uids": row["email_uids"],
+        "report_type": row["report_type"],
+        "subject": row["subject"],
+        "recipient": row["recipient"],
+        "sent_at": row["sent_at"],
+        "status": row["status"],
+    }
 
 
 def get_sender_addresses_for_created_date(date_str: str) -> list:

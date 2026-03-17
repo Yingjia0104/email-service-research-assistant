@@ -29,13 +29,6 @@
             color: #1a1a1a;
             margin-top: 25px;
         }
-        h4 {
-            color: #146785;
-            margin-top: 18px;
-            margin-bottom: 8px;
-            font-size: 15px;
-            letter-spacing: 0.01em;
-        }
         .meta {
             color: #666;
             font-size: 14px;
@@ -71,45 +64,9 @@
         li {
             margin-bottom: 8px;
         }
-        .signal-box {
-            background-color: #f8f9fa;
-            border: 1px solid #e0e0e0;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 4px;
-        }
-        .signal-header {
-            font-weight: 600;
-            color: #146785;
-            margin-bottom: 8px;
-        }
-        .action-box {
-            background-color: #f0f7fa;
-            border-left: 3px solid #31A8C4;
-            padding: 12px;
-            margin: 15px 0;
-            font-size: 13px;
-        }
-        .label-line {
-            margin: 10px 0;
-        }
-        .ticker {
-            font-family: "Courier New", monospace;
-            font-weight: bold;
-            color: #146785;
-        }
-        .bullish {
-            color: #2e7d32;
-            font-weight: 600;
-        }
-        .bearish {
-            color: #c62828;
-            font-weight: 600;
-        }
         p {
             margin: 10px 0;
         }
         strong {
             color: #1a1a1a;
         }
-    

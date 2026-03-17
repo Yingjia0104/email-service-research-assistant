@@ -1260,6 +1260,250 @@ class SmokeTests(unittest.TestCase):
         self.assertNotIn("归因提醒", html)
         self.assertNotIn("来源依据", html)
 
+    def test_parse_report_payload_separates_core_fact_and_action_highlights(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场波动提升",
+            "key_signals": ["高亮拆分测试"]
+          },
+          "core_events": [
+            {
+              "headline": "普通主题",
+              "core_facts": ["公司宣布新版本上线"],
+              "action": "估值折扣创造entry point",
+              "highlight_phrases": ["估值折扣创造entry point"]
+            }
+          ]
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+        event = payload["core_events"][0]
+
+        self.assertEqual(event["core_fact_highlight_phrases"], [])
+        self.assertIn("估值折扣创造entry point", event["action_highlight_phrases"])
+
+    def test_render_report_html_uses_fact_specific_highlights(self):
+        import qclaw_mail_file
+
+        html = qclaw_mail_file.render_report_html(
+            {
+                "executive_summary": {
+                    "market_background": "市场背景 A",
+                    "key_signals": ["关键信号 B"],
+                },
+                "core_events": [
+                    {
+                        "headline": "主题一",
+                        "core_facts": ["公司宣布新版本上线"],
+                        "core_fact_highlight_phrases": [],
+                        "market_views": [],
+                        "action": "估值折扣创造entry point",
+                        "action_highlight_phrases": ["估值折扣创造entry point"],
+                        "highlight_phrases": ["估值折扣创造entry point"],
+                    }
+                ],
+                "local_news": [
+                    {
+                        "headline": "边缘信号一",
+                        "signal": "普通信号",
+                        "importance": "普通重要性",
+                        "action": "普通动作",
+                        "highlight_phrases": [],
+                    }
+                ],
+                "peripheral_intelligence": {
+                    "mapped_events": [],
+                    "cross_market_signals": [],
+                },
+                "actionable_ideas": {
+                    "short_term": [],
+                    "medium_term": [],
+                    "catalysts": [],
+                    "bottom_line": "总结句",
+                },
+            }
+        )
+
+        self.assertIn("<li>公司宣布新版本上线</li>", html)
+        self.assertIn('<span class="highlight">估值折扣创造entry point</span>', html)
+        self.assertNotIn('<li><span class="highlight">公司宣布新版本上线</span></li>', html)
+
+    def test_parse_report_payload_separates_local_news_highlights(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场波动提升",
+            "key_signals": ["拆分测试"]
+          },
+          "local_news": [
+            {
+              "headline": "边缘信号一",
+              "signal": "只是普通更新",
+              "importance": "系统性流动性收缩",
+              "action": "估值折扣创造entry point",
+              "highlight_phrases": ["估值折扣创造entry point"]
+            }
+          ]
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+        item = payload["local_news"][0]
+
+        self.assertEqual(item["signal_highlight_phrases"], [])
+        self.assertIn("系统性流动性收缩", item["importance_highlight_phrases"])
+        self.assertIn("估值折扣创造entry point", item["action_highlight_phrases"])
+
+    def test_render_report_html_uses_local_news_specific_highlights(self):
+        import qclaw_mail_file
+
+        html = qclaw_mail_file.render_report_html(
+            {
+                "executive_summary": {
+                    "market_background": "市场背景 A",
+                    "key_signals": ["关键信号 B"],
+                },
+                "core_events": [],
+                "local_news": [
+                    {
+                        "headline": "边缘信号一",
+                        "signal": "只是普通更新",
+                        "importance": "系统性流动性收缩",
+                        "action": "估值折扣创造entry point",
+                        "signal_highlight_phrases": [],
+                        "importance_highlight_phrases": ["系统性流动性收缩"],
+                        "action_highlight_phrases": ["估值折扣创造entry point"],
+                        "highlight_phrases": ["估值折扣创造entry point"],
+                    }
+                ],
+                "peripheral_intelligence": {
+                    "mapped_events": [],
+                    "cross_market_signals": [],
+                },
+                "actionable_ideas": {
+                    "short_term": [],
+                    "medium_term": [],
+                    "catalysts": [],
+                    "bottom_line": "总结句",
+                },
+            }
+        )
+
+        self.assertIn("<p>只是普通更新</p>", html)
+        self.assertIn('<span class="highlight">系统性流动性收缩</span>', html)
+        self.assertIn('<span class="highlight">估值折扣创造entry point</span>', html)
+        self.assertNotIn('<span class="highlight">只是普通更新</span>', html)
+
+    def test_parse_report_payload_splits_market_view_highlights(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场波动提升",
+            "key_signals": ["市场观点拆分测试"]
+          },
+          "core_events": [
+            {
+              "headline": "主题一",
+              "market_views": [
+                {
+                  "source": "Morgan Stanley",
+                  "stance": "强烈看多",
+                  "thesis": "估值折扣创造entry point",
+                  "highlight_phrases": ["估值折扣创造entry point"]
+                }
+              ]
+            }
+          ]
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+        row = payload["core_events"][0]["market_views"][0]
+
+        self.assertIn("强烈看多", row["stance_highlight_phrases"])
+        self.assertIn("估值折扣创造entry point", row["thesis_highlight_phrases"])
+        self.assertNotIn("Morgan Stanley", row["thesis_highlight_phrases"])
+
+    def test_render_market_views_table_does_not_highlight_source(self):
+        import qclaw_mail_file
+
+        html = qclaw_mail_file.render_market_views_table([
+            {
+                "source": "Morgan Stanley",
+                "stance": "强烈看多",
+                "thesis": "估值折扣创造entry point",
+                "stance_highlight_phrases": ["强烈看多"],
+                "thesis_highlight_phrases": ["估值折扣创造entry point"],
+            }
+        ])
+
+        self.assertIn("<strong>Morgan Stanley</strong>", html)
+        self.assertIn('<span class="highlight">强烈看多</span>', html)
+        self.assertIn('<span class="highlight">估值折扣创造entry point</span>', html)
+        self.assertNotIn('<span class="highlight">Morgan Stanley</span>', html)
+
+    def test_parse_report_payload_splits_cross_market_signal_highlights(self):
+        import qclaw_mail_file
+
+        raw = """{
+          "executive_summary": {
+            "market_background": "市场波动提升",
+            "key_signals": ["跨市场高亮拆分测试"]
+          },
+          "peripheral_intelligence": {
+            "mapped_events": [],
+            "cross_market_signals": [
+              {
+                "headline": "跨市场信号A",
+                "bullets": ["系统性流动性收缩"],
+                "highlight_phrases": ["系统性流动性收缩"]
+              }
+            ]
+          }
+        }"""
+
+        payload = qclaw_mail_file.parse_report_payload_json(raw)
+        item = payload["peripheral_intelligence"]["cross_market_signals"][0]
+
+        self.assertEqual(item["headline"], "跨市场信号A")
+        self.assertIn("系统性流动性收缩", item["bullet_highlight_phrases"])
+
+    def test_render_report_html_does_not_highlight_cross_market_headline(self):
+        import qclaw_mail_file
+
+        html = qclaw_mail_file.render_report_html(
+            {
+                "executive_summary": {
+                    "market_background": "市场背景 A",
+                    "key_signals": ["关键信号 B"],
+                },
+                "core_events": [],
+                "local_news": [],
+                "peripheral_intelligence": {
+                    "mapped_events": [],
+                    "cross_market_signals": [
+                        {
+                            "headline": "跨市场信号A",
+                            "bullets": ["系统性流动性收缩"],
+                            "bullet_highlight_phrases": ["系统性流动性收缩"],
+                        }
+                    ],
+                },
+                "actionable_ideas": {
+                    "short_term": [],
+                    "medium_term": [],
+                    "catalysts": [],
+                    "bottom_line": "总结句",
+                },
+            }
+        )
+
+        self.assertIn("<strong>跨市场信号A</strong>", html)
+        self.assertIn('<span class="highlight">系统性流动性收缩</span>', html)
+        self.assertNotIn('<span class="highlight">跨市场信号A</span>', html)
+
     def test_derive_highlight_phrases_prefers_judgment_over_numbers(self):
         import qclaw_mail_file
 
