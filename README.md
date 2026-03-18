@@ -2,7 +2,7 @@
 
 [English Version](./README_EN.md)
 
-自动化邮件分析和推送助手，将卖方邮件转化为专业的 HF Morning Brief 投资报告。
+自动化邮件分析和推送助手，将卖方邮件转化为专业的 HF Morning Brief 投资报告
 
 ## 业务流程
 
@@ -25,10 +25,7 @@
 - 🔀 **容错分析链路**：主模型短重试后自动切备用模型；超长输入会拆批分析后再合并
 - 🧠 **角色化研究输出**：支持按不同使用者角色配置研究视角与晨报口径
 - ⏰ **自动模式调度**：`main.py` 可按固定频率轮询收件箱，并在盘前窗口内自动触发 `daily / supplement`
-- 🪟 **Session 感知的 early run**：只在本轮 briefing session 内白名单 sales 全部到齐、邮件数足够且 quiet period 满足时提前触发
-- 🧾 **实时运行日志**：自动收件、触发判断、`qclaw_mail_file.py` 子进程输出都会实时写入 `main_runtime.log`
-- 🔒 **单实例分析保护**：自动模式下避免重复触发多个分析子进程，降低并发重入导致的状态冲突
-- 🏷️ **机构来源识别**：报告头部 `Source` 优先显示本轮内容里识别到的机构来源（如 `MS + JPM + BofA`），而不是转发邮箱本身
+- 🪟 **Session感知**：支持在briefing session 内白名单 sales 全部到齐、邮件数足够且 quiet period 满足时提前触发AI分析
 
 ## 报告内容
 
