@@ -77,5 +77,5 @@ background:
   enabled: true
   interval_minutes: 15
   limit: 20
-  # DDL 定时分析；如仅想依赖“全员到齐即提前触发 daily”，可临时设为 false
+  # DDL 定时分析；early run 仍要求本轮 session 内白名单 sales 到齐 + 邮件数阈值 + quiet period
   analysis_enabled: true

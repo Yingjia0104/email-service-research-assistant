@@ -494,6 +494,61 @@ def get_sender_addresses_for_created_date(date_str: str) -> list:
     return results
 
 
+def get_sender_addresses_created_since(start_at: str) -> list:
+    """获取某个时间点之后创建的邮件发件人地址列表。"""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT email_from
+        FROM emails
+        WHERE created_at >= ?
+        """,
+        (start_at,),
+    )
+    results = [row[0] for row in cursor.fetchall() if row[0]]
+    conn.close()
+    return results
+
+
+def count_emails_created_since(start_at: str) -> int:
+    """统计某个时间点之后创建的邮件数量。"""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM emails
+        WHERE created_at >= ?
+        """,
+        (start_at,),
+    )
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def has_new_email_within_minutes(minutes: int, reference_time: datetime = None) -> bool:
+    """判断最近 N 分钟内是否仍有新邮件进入数据库。"""
+    now_bjt = (reference_time or datetime.now(BJT)).astimezone(BJT)
+    threshold = (now_bjt - timedelta(minutes=minutes)).isoformat()
+
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT 1
+        FROM emails
+        WHERE created_at >= ?
+        LIMIT 1
+        """,
+        (threshold,),
+    )
+    found = cursor.fetchone() is not None
+    conn.close()
+    return found
+
+
 def has_successful_report_on_date(date_str: str, report_type: str = None) -> bool:
     """判断某天是否已经有成功发送的报告。"""
     conn = _connect()

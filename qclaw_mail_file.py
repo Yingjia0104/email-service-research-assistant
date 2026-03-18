@@ -17,6 +17,7 @@ QClaw 邮件自动处理 - 文件交互版
 
 import os
 import sys
+import atexit
 import yaml
 import json
 import time
@@ -249,13 +250,15 @@ def setup_logging():
         format='%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
-            logging.FileHandler(LOG_FILE, encoding='utf-8'),
+            logging.FileHandler(LOG_FILE, encoding='utf-8', delay=True),
             logging.StreamHandler(sys.stdout)
-        ]
+        ],
+        force=True,
     )
     return logging.getLogger(__name__)
 
 logger = setup_logging()
+atexit.register(logging.shutdown)
 
 # ============ 代理设置 ============
 # 先保留原始代理配置，后面按提供方决定是否使用。
@@ -2840,8 +2843,8 @@ def estimate_read_minutes_from_html(body_content: str) -> int:
     return max(1, min(8, round(len(text) / 320)))
 
 
-def extract_source_label_from_email(email: Dict) -> str:
-    """优先从邮件主题/正文中提取更真实的来源标签，再回退到发件人。"""
+def extract_recognized_source_label_from_email(email: Dict) -> str:
+    """优先从邮件主题/正文中提取更真实的机构来源标签。"""
     search_text = " ".join(
         [
             str(email.get("subject") or ""),
@@ -2855,10 +2858,7 @@ def extract_source_label_from_email(email: Dict) -> str:
             if re.search(pattern, search_text, flags=re.IGNORECASE):
                 return label
 
-    from_name = (email.get("from_name") or "").strip()
-    if from_name:
-        return from_name
-    return (email.get("from") or "").strip()
+    return ""
 
 
 def build_report_meta_html(source_emails: Optional[List[Dict]], body_content: str) -> str:
@@ -2867,7 +2867,7 @@ def build_report_meta_html(source_emails: Optional[List[Dict]], body_content: st
     labels = []
     seen = set()
     for email in source_emails or []:
-        label = extract_source_label_from_email(email)
+        label = extract_recognized_source_label_from_email(email)
         if not label:
             continue
         key = label.lower()
@@ -2875,7 +2875,7 @@ def build_report_meta_html(source_emails: Optional[List[Dict]], body_content: st
             continue
         seen.add(key)
         labels.append(label)
-    source_text = " + ".join(labels[:4]) if labels else "Whitelisted analyst emails"
+    source_text = " + ".join(labels[:4]) if labels else "Whitelisted source emails"
     return f'<div class="meta">Prepared by: AI Research Assistant | Source: {escape(source_text)} | Reading time: {read_minutes} mins</div>'
 
 
@@ -3450,8 +3450,9 @@ def print_status():
 
 def main():
     """主程序"""
+    primary_model = load_llm_config().get("model", "unknown")
     print("=" * 60)
-    print("🚀 QClaw 邮件自动处理 - GPT / 备用模型分析版")
+    print(f"🚀 LLM 邮件自动处理中 - {primary_model}")
     print("=" * 60)
     print(f"当前时间: {datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')} (北京时间)")
     print()
@@ -3481,7 +3482,7 @@ def main():
     try:
         # 分析模式
         if analyze_mode:
-            logger.info("📊 分析模式：调用主模型/备用模型分析已存在的邮件")
+            logger.info("📊 分析模式：调用当前 LLM 链路分析已存在的邮件")
 
             # 从数据库获取待处理邮件
             emails = email_db.get_pending_emails(limit=20)
@@ -3492,7 +3493,7 @@ def main():
 
             logger.info(f"📧 待分析邮件数: {len(emails)}")
 
-            # 调用主模型/备用模型分析
+            # 调用当前 LLM 链路分析
             try:
                 html_content = analyze_emails_with_llm(emails)
             except Exception as e:
@@ -3578,7 +3579,7 @@ def main():
         logger.info(f"📭 待处理邮件数: {len(emails)}")
 
         # 第二步：AI 分析
-        logger.info("【步骤 2/4】GPT / 备用模型分析...")
+        logger.info("【步骤 2/4】LLM / 备用链路分析...")
 
         try:
             html_content = analyze_emails_with_llm(emails)

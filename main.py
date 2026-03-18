@@ -16,6 +16,7 @@ import asyncio
 import logging
 import base64
 import socket
+from asyncio.subprocess import PIPE
 from contextlib import asynccontextmanager
 
 # 配置日志
@@ -65,7 +66,7 @@ config = load_config()
 
 
 background_tasks = []
-analysis_task_lock = asyncio.Lock()
+analysis_task_lock = None
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif')
 MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS = 12000
@@ -104,6 +105,14 @@ ATTACHMENT_DISCLAIMER_MARKERS = (
     "重要提示",
     "法律声明",
 )
+
+
+def get_analysis_task_lock() -> asyncio.Lock:
+    """延迟创建分析互斥锁，避免模块导入时提前绑定默认 event loop。"""
+    global analysis_task_lock
+    if analysis_task_lock is None:
+        analysis_task_lock = asyncio.Lock()
+    return analysis_task_lock
 
 
 def _extract_attachment_bytes(att):
@@ -334,13 +343,13 @@ def should_accept_sender(from_addr: str, allowed_senders: list) -> bool:
 
 
 def get_expected_senders(cfg: dict) -> list:
-    """获取今天要等齐的全部分析师名单。"""
+    """获取当前自动触发逻辑中要等待的全部白名单 sales 名单。"""
     filters = cfg.get("filters", {})
     return [(sender or "").strip().lower() for sender in filters.get("allowed_senders", []) if sender]
 
 
 def get_received_sender_matches_for_today(allowed_senders: list, reference_time: Optional[datetime] = None) -> set:
-    """返回今天已收到并命中的白名单分析师集合。"""
+    """返回当天自然日内已收到并命中的白名单 sales 集合。"""
     if not allowed_senders:
         return set()
 
@@ -353,13 +362,86 @@ def get_received_sender_matches_for_today(allowed_senders: list, reference_time:
     return matches
 
 
-def all_expected_senders_arrived(allowed_senders: list, reference_time: Optional[datetime] = None) -> bool:
-    """判断今天是否已经收齐全部白名单分析师邮件。"""
+def get_briefing_session_start(reference_time: Optional[datetime] = None) -> datetime:
+    """定义一轮盘前 briefing 的起点：最近一个美股交易日收盘（16:00 ET）后的北京时间。"""
+    now_bjt = _ensure_bjt(reference_time)
+
+    for day_offset in range(0, 8):
+        candidate_date_et = now_bjt.astimezone(US_ET).date() - timedelta(days=day_offset)
+        if candidate_date_et.weekday() >= 5:
+            continue
+
+        market_close_et = datetime.combine(candidate_date_et, time(16, 0), tzinfo=US_ET)
+        market_close_bjt = market_close_et.astimezone(BJT)
+        if market_close_bjt < now_bjt:
+            return market_close_bjt
+
+    raise RuntimeError("无法计算最近一个 briefing session 的起点")
+
+
+def get_received_sender_matches_for_session(allowed_senders: list, reference_time: Optional[datetime] = None) -> set:
+    """返回当前 briefing session 内已收到并命中的白名单 sales 集合。"""
+    if not allowed_senders:
+        return set()
+
+    session_start = get_briefing_session_start(reference_time).isoformat()
+    matches = set()
+    for raw_sender in email_db.get_sender_addresses_created_since(session_start):
+        matched = match_allowed_sender(extract_sender_email(raw_sender), allowed_senders)
+        if matched:
+            matches.add(matched)
+    return matches
+
+
+def all_expected_senders_arrived_for_session(allowed_senders: list, reference_time: Optional[datetime] = None) -> bool:
+    """判断当前 briefing session 内是否已经收齐全部白名单 sales 邮件。"""
     expected = {(sender or "").strip().lower() for sender in allowed_senders or [] if sender}
     if not expected:
         return False
-    received = get_received_sender_matches_for_today(list(expected), reference_time)
+    received = get_received_sender_matches_for_session(list(expected), reference_time)
     return expected.issubset(received)
+
+
+def should_trigger_early_daily(allowed_senders: list, bg_cfg: dict, reference_time: Optional[datetime] = None) -> tuple[bool, str]:
+    """盘前提前触发规则：白名单全到齐 + session 内邮件够多 + 最近 N 分钟无新邮件。"""
+    now_bjt = _ensure_bjt(reference_time)
+    quiet_minutes = int(bg_cfg.get("early_quiet_minutes", 10) or 10)
+    min_new_emails = int(bg_cfg.get("early_min_new_emails", max(2, len(allowed_senders) or 0)) or max(2, len(allowed_senders) or 0))
+    session_start = get_briefing_session_start(now_bjt)
+    expected = {(sender or "").strip().lower() for sender in allowed_senders or [] if sender}
+    received = get_received_sender_matches_for_session(list(expected), now_bjt)
+    missing = sorted(expected - received)
+
+    if expected and not expected.issubset(received):
+        return False, (
+            f"白名单 sales 尚未在本轮 session 内全部到齐；"
+            f"session_start={session_start.strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"已到齐={sorted(received)}, 缺失={missing}"
+        )
+
+    session_email_count = email_db.count_emails_created_since(session_start.isoformat())
+    if session_email_count < min_new_emails:
+        return False, (
+            f"本轮 session 邮件数不足（{session_email_count}/{min_new_emails}）；"
+            f"session_start={session_start.strftime('%Y-%m-%d %H:%M:%S')}, 已到齐={sorted(received)}"
+        )
+
+    if email_db.has_new_email_within_minutes(quiet_minutes, now_bjt):
+        return False, (
+            f"最近 {quiet_minutes} 分钟仍有新邮件，继续等待；"
+            f"session_start={session_start.strftime('%Y-%m-%d %H:%M:%S')}, 已到齐={sorted(received)}, "
+            f"session邮件数={session_email_count}"
+        )
+
+    return True, (
+        f"满足 early run 条件：session_start={session_start.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"已到齐={sorted(received)}, 邮件数={session_email_count}, quiet={quiet_minutes}m"
+    )
+
+
+def all_expected_senders_arrived(allowed_senders: list, reference_time: Optional[datetime] = None) -> bool:
+    """兼容旧调用：按当前 briefing session 口径判断是否已收齐白名单 sales。"""
+    return all_expected_senders_arrived_for_session(allowed_senders, reference_time)
 
 
 def has_daily_report_sent_today(reference_time: Optional[datetime] = None) -> bool:
@@ -469,11 +551,10 @@ def get_emails(
         allowed_senders = filters.get("allowed_senders", [])
         received_after_local = parse_received_after_local(filters, local_tz)
 
-        now_local = datetime.now(local_tz)
-        today = now_local.date()
-        yesterday = today - timedelta(days=1)
-
-        logger.info(f"📅 日期过滤: {yesterday.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')} (本地时区: {local_tz})")
+        if received_after_local:
+            logger.info(f"📅 收件起点: {received_after_local.isoformat()} (本地时区: {local_tz})")
+        else:
+            logger.info(f"📅 收件起点: 不限制 (本地时区: {local_tz})")
         logger.info(f"🔍 发件人过滤: {allowed_senders}")
 
         with MailBox(source, timeout=30).login(email_addr, email_pass) as mailbox:
@@ -484,12 +565,7 @@ def get_emails(
 
             for msg in mailbox.fetch(limit=fetch_limit, reverse=True):
                 from_addr = str(msg.from_)
-                msg_date = get_message_local_date(msg.date, local_tz)
                 msg_local_dt = get_message_local_datetime(msg.date, local_tz)
-
-                # 日期过滤：只保留今天和昨天的邮件
-                if msg_date and msg_date not in [today, yesterday]:
-                    continue
 
                 # 可选联调过滤：忽略某个本地时间点之前的历史邮件
                 if received_after_local and msg_local_dt and msg_local_dt < received_after_local:
@@ -718,7 +794,16 @@ US_ET = ZoneInfo("America/New_York")
 background_task = None
 
 
-def _fetch_emails_for_db_sync(host: str, email_addr: str, email_pass: str, allowed_senders: list, today, yesterday, local_tz, received_after_local, limit: int, folder: str = "INBOX"):
+def runtime_timestamp() -> str:
+    """统一的运行时日志时间戳，方便录屏时观察轮询/触发节奏。"""
+    return datetime.now().astimezone().strftime("%H:%M:%S")
+
+
+def runtime_print(message: str) -> None:
+    print(f"[{runtime_timestamp()}] {message}")
+
+
+def _fetch_emails_for_db_sync(host: str, email_addr: str, email_pass: str, allowed_senders: list, local_tz, received_after_local, limit: int, folder: str = "INBOX"):
     """同步收取邮件（供 asyncio.to_thread 调用）"""
     emails = []
     fetch_limit = max(limit * 5, 50)
@@ -726,11 +811,7 @@ def _fetch_emails_for_db_sync(host: str, email_addr: str, email_pass: str, allow
     with MailBox(host, timeout=30).login(email_addr, email_pass) as mailbox:
         for msg in mailbox.fetch(limit=fetch_limit, reverse=True):
             from_addr = str(msg.from_)
-            msg_date = get_message_local_date(msg.date, local_tz)
             msg_local_dt = get_message_local_datetime(msg.date, local_tz)
-
-            if msg_date and msg_date not in [today, yesterday]:
-                continue
 
             if received_after_local and msg_local_dt and msg_local_dt < received_after_local:
                 continue
@@ -787,11 +868,8 @@ async def fetch_and_save_emails():
     host = imap_cfg.get("host", "imap.gmail.com")
     limit = bg_cfg.get("limit", 20)
 
-    # 日期过滤：获取今天和昨天的邮件
     local_tz = datetime.now().astimezone().tzinfo
     now_local = datetime.now(local_tz)
-    today = now_local.date()
-    yesterday = today - timedelta(days=1)
 
     # 获取过滤配置
     filters = cfg.get("filters", {})
@@ -801,10 +879,13 @@ async def fetch_and_save_emails():
     # 获取数据库状态
     status = email_db.get_status()
 
-    print(f"📬 [后台] 正在收取邮件...")
-    print(f"   📅 日期过滤: {yesterday.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}")
-    print(f"   🔍 发件人过滤: {allowed_senders}")
-    print(f"   📊 数据库状态: 总计 {status['total']}, 待处理 {status['pending']}, 已处理 {status['processed']}")
+    runtime_print(f"📬 [后台] 正在收取邮件...")
+    if received_after_local:
+        runtime_print(f"   📅 收件起点: {received_after_local.strftime('%Y-%m-%d %H:%M:%S %z')}")
+    else:
+        runtime_print("   📅 收件起点: 不限制（按邮箱最新邮件顺序回溯）")
+    runtime_print(f"   🔍 发件人过滤: {allowed_senders}")
+    runtime_print(f"   📊 数据库状态: 总计 {status['total']}, 待处理 {status['pending']}, 已处理 {status['processed']}")
 
     try:
         emails = await asyncio.to_thread(
@@ -813,8 +894,6 @@ async def fetch_and_save_emails():
             email_addr,
             email_pass,
             allowed_senders,
-            today,
-            yesterday,
             local_tz,
             received_after_local,
             limit,
@@ -823,32 +902,35 @@ async def fetch_and_save_emails():
         # 保存到数据库（自动去重）
         added_count = email_db.add_emails(emails)
 
-        print(f"✅ [后台] 新邮件: {added_count} 封，已存入数据库")
-        print(f"   📊 待处理邮件: {email_db.get_status()['pending']} 封")
+        runtime_print(f"✅ [后台] 新邮件: {added_count} 封，已存入数据库")
+        runtime_print(f"   📊 待处理邮件: {email_db.get_status()['pending']} 封")
 
-        # 早触发：如果今天白名单分析师都已经到齐，且尚未发送 daily，则无需继续等盘前 DDL。
-        if not has_daily_report_sent_today() and all_expected_senders_arrived(allowed_senders):
-            print("🚀 [后台] 今日白名单分析师已全部到齐，提前触发 daily 分析")
-            await trigger_daily_analysis(reason="all_senders_arrived")
-            return
+        # 早触发：只有当本轮 session 内白名单 sales 全部到齐、邮件数量足够且最近一段时间安静时，才提前跑 daily。
+        if not has_daily_report_sent_today():
+            should_early_run, reason = should_trigger_early_daily(allowed_senders, bg_cfg, now_local)
+            if should_early_run:
+                runtime_print(f"🚀 [后台] 提前触发 daily 分析：{reason}")
+                await trigger_daily_analysis(reason="all_senders_arrived_quiet")
+                return
+            runtime_print(f"   ⏳ 本轮暂不 early run：{reason}")
 
         # 检查是否在补充分析时间窗口内
         if added_count > 0 and is_in_supplement_window():
             # 触发补充分析
             await trigger_supplement_analysis(added_count)
     except Exception as e:
-        print(f"❌ [后台] 收取邮件失败: {e}")
+        runtime_print(f"❌ [后台] 收取邮件失败: {e}")
 
 
 async def background_fetch_loop():
     """后台循环：定期收取邮件"""
     bg_cfg = load_config().get("background", {})
     if not bg_cfg.get("enabled", False):
-        print("⚠️ 后台收取已禁用")
+        runtime_print("⚠️ 后台收取已禁用")
         return
 
     interval = bg_cfg.get("interval_minutes", 15) * 60
-    print(f"⏰ 后台收取已启用，每 {bg_cfg.get('interval_minutes', 15)} 分钟收取一次邮件")
+    runtime_print(f"⏰ 后台收取已启用，每 {bg_cfg.get('interval_minutes', 15)} 分钟收取一次邮件")
 
     while True:
         await fetch_and_save_emails()
@@ -922,95 +1004,82 @@ async def trigger_supplement_analysis(new_emails_count: int):
     if new_emails_count == 0:
         return
 
-    if analysis_task_lock.locked():
-        print("   ⏭️ 当前已有分析任务运行中，跳过本次 supplement")
+    if not has_daily_report_sent_today():
+        runtime_print("   ⏭️ 今日尚未发送 daily 报告，跳过 supplement")
+        return
+
+    analysis_lock = get_analysis_task_lock()
+    if analysis_lock.locked():
+        runtime_print("   ⏭️ 当前已有分析任务运行中，跳过本次 supplement")
         return
 
     # 检查是否有待处理邮件
     pending_emails = email_db.get_pending_emails(limit=50)
     if not pending_emails:
-        print("   📭 没有待处理的邮件，跳过补充分析")
+        runtime_print("   📭 没有待处理的邮件，跳过补充分析")
         return
 
     # 只对 supplement 自己做节流，避免刚发完 daily 就把应发的补充报告也拦掉
     recent_supplement = email_db.get_recent_successful_report(report_type="supplement", within_hours=1)
     if recent_supplement:
-        print("   ⏭️ 1小时内已发送过 supplement，跳过本次补充分析")
+        runtime_print("   ⏭️ 1小时内已发送过 supplement，跳过本次补充分析")
         return
 
-    print("\n" + "="*50)
-    print("📈 检测到开盘期间新邮件，触发补充分析！")
-    print("="*50)
-    print(f"   📧 待处理邮件数: {len(pending_emails)}")
+    runtime_print("="*50)
+    runtime_print("📈 检测到开盘期间新邮件，触发补充分析！")
+    runtime_print("="*50)
+    runtime_print(f"   📧 待处理邮件数: {len(pending_emails)}")
 
-    # 调用 qclaw_mail_file 的补充分析模式
-    import subprocess
-    async with analysis_task_lock:
+    async with analysis_lock:
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["python3", os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py"), "--analyze", "--supplement"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=os.path.dirname(__file__),
-            )
-            print(result.stdout)
-            if result.stderr:
-                print("STDERR:", result.stderr)
-        except subprocess.TimeoutExpired:
-            print("❌ 补充分析超时")
+            exit_code = await _run_qclaw_and_stream_logs(["--analyze", "--supplement"], label="supplement")
+            if exit_code != 0:
+                runtime_print(f"❌ 补充分析退出码异常: {exit_code}")
+        except asyncio.TimeoutError:
+            runtime_print("❌ 补充分析超时")
         except Exception as e:
-            print(f"❌ 补充分析失败: {e}")
+            runtime_print(f"❌ 补充分析失败: {e}")
 
 
 async def trigger_daily_analysis(reason: str):
     """触发 daily 分析。"""
-    if analysis_task_lock.locked():
-        print(f"   ⏭️ 当前已有分析任务运行中，跳过 daily ({reason})")
+    analysis_lock = get_analysis_task_lock()
+    if analysis_lock.locked():
+        runtime_print(f"   ⏭️ 当前已有分析任务运行中，跳过 daily ({reason})")
         return
 
     pending = email_db.get_pending_emails(limit=1)
     if not pending:
-        print("   📭 没有待处理邮件，跳过 daily 分析")
+        runtime_print("   📭 没有待处理邮件，跳过 daily 分析")
         return
 
-    print("\n" + "=" * 50)
-    print(f"📨 触发 daily 分析 ({reason})")
-    print("=" * 50)
+    runtime_print("=" * 50)
+    runtime_print(f"📨 触发 daily 分析 ({reason})")
+    runtime_print("=" * 50)
 
-    import subprocess
-    async with analysis_task_lock:
+    async with analysis_lock:
         if has_daily_report_sent_today():
-            print(f"   ⏭️ 今日已发送 daily 报告，跳过 ({reason})")
+            runtime_print(f"   ⏭️ 今日已发送 daily 报告，跳过 ({reason})")
             return
         pending = email_db.get_pending_emails(limit=1)
         if not pending:
-            print("   📭 没有待处理邮件，跳过 daily 分析")
+            runtime_print("   📭 没有待处理邮件，跳过 daily 分析")
             return
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["python3", os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py"), "--analyze"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=os.path.dirname(__file__),
-            )
-            print(result.stdout)
-            if result.stderr:
-                print("STDERR:", result.stderr)
-        except subprocess.TimeoutExpired:
-            print("❌ daily 分析超时")
+            exit_code = await _run_qclaw_and_stream_logs(["--analyze"], label=f"daily/{reason}")
+            if exit_code != 0:
+                runtime_print(f"❌ daily 分析退出码异常: {exit_code}")
+        except asyncio.TimeoutError:
+            runtime_print("❌ daily 分析超时")
         except Exception as e:
-            print(f"❌ daily 分析失败: {e}")
+            runtime_print(f"❌ daily 分析失败: {e}")
 
 
 async def scheduled_analysis_loop():
     """定时分析循环：每天美股开盘前15分钟触发分析"""
     next_trigger = get_next_market_trigger_time()
-    print(f"⏰ 定时分析已启用")
-    print(f"   📈 下一个触发点: 美股开盘前15分钟（北京时间 {next_trigger.strftime('%Y-%m-%d %H:%M')}）")
+    runtime_print(f"⏰ 定时分析已启用")
+    runtime_print(f"   📈 收件截止时间: 美股开盘前15分钟（北京时间 {next_trigger.strftime('%Y-%m-%d %H:%M')}）")
 
     while True:
         now = datetime.now(BJT)
@@ -1018,21 +1087,67 @@ async def scheduled_analysis_loop():
 
         # 等待直到触发时间
         wait_seconds = (next_trigger - now).total_seconds()
-        print(f"   ⏳ 下次分析: {next_trigger.strftime('%Y-%m-%d %H:%M')} ({(wait_seconds/3600):.1f}小时后)")
+        runtime_print(f"   ⏳ 分析启动时间: {next_trigger.strftime('%Y-%m-%d %H:%M')} ({(wait_seconds/3600):.1f}小时后)")
         await asyncio.sleep(wait_seconds)
 
         # 检查今天是否已发送过报告
         if has_daily_report_sent_today():
-            print(f"   ⏭️ 今日已发送 daily 报告，跳过")
+            runtime_print(f"   ⏭️ 今日已发送 daily 报告，跳过")
             continue
 
         # 检查是否有待处理邮件
         pending = email_db.get_pending_emails(limit=1)
         if not pending:
-            print(f"   ⏭️ 没有待处理邮件，跳过")
+            runtime_print(f"   ⏭️ 没有待处理邮件，跳过")
             continue
 
         await trigger_daily_analysis(reason="ddl_reached")
+
+
+async def _stream_subprocess_pipe(pipe, prefix: str):
+    """实时转发子进程 stdout/stderr，方便录屏时看到完整链路。"""
+    if pipe is None:
+        return
+
+    while True:
+        line = await pipe.readline()
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").rstrip()
+        if text:
+            runtime_print(f"{prefix}{text}")
+
+
+async def _run_qclaw_and_stream_logs(args: list[str], label: str, timeout: int = 900) -> int:
+    """启动 qclaw_mail_file 并实时打印完整日志，而不是在结束后一次性输出。"""
+    script_path = os.path.join(os.path.dirname(__file__), "qclaw_mail_file.py")
+    cmd = ["python3", "-u", script_path, *args]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    runtime_print(f"   ▶️ 启动分析子进程 ({label}): {' '.join(cmd)}")
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=os.path.dirname(__file__),
+        stdout=PIPE,
+        stderr=PIPE,
+        env=env,
+    )
+
+    stdout_task = asyncio.create_task(_stream_subprocess_pipe(process.stdout, "   │ "))
+    stderr_task = asyncio.create_task(_stream_subprocess_pipe(process.stderr, "   ! "))
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise
+    finally:
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+    runtime_print(f"   ✅ 分析子进程结束 ({label})，退出码: {process.returncode}")
+    return process.returncode
 
 
 # ============ 启动 ============
@@ -1042,9 +1157,9 @@ if __name__ == "__main__":
     server_cfg = config.get("server", {})
     host = server_cfg.get("host", "127.0.0.1")
     port = server_cfg.get("port", 8877)
-    print(f"🚀 邮件服务 API 启动中...")
-    print(f"   地址: http://{host}:{port}")
-    print(f"   健康检查: http://{host}:{port}/health")
+    runtime_print(f"🚀 邮件服务 API 启动中...")
+    runtime_print(f"   地址: http://{host}:{port}")
+    runtime_print(f"   健康检查: http://{host}:{port}/health")
 
     uvicorn.run(
         app,

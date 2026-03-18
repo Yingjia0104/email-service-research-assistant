@@ -11,6 +11,17 @@ from zoneinfo import ZoneInfo
 from unittest.mock import Mock, patch
 
 
+def tearDownModule():
+    """显式回收默认 event loop，避免测试尾声的 ResourceWarning。"""
+    try:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+    except RuntimeError:
+        return
+    if not loop.is_closed():
+        loop.close()
+    asyncio.set_event_loop(None)
+
+
 class SmokeTests(unittest.TestCase):
     def assertContainsAll(self, text, snippets):
         for snippet in snippets:
@@ -254,17 +265,97 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(main.match_allowed_sender("foo@broker.com", allowed), "@broker.com")
         self.assertIsNone(main.match_allowed_sender("foo@other.com", allowed))
 
-    def test_all_expected_senders_arrived_uses_today_matches(self):
+    def test_all_expected_senders_arrived_uses_session_matches(self):
         import main
 
         allowed = ["analyst@example.com", "@broker.com"]
-        with patch.object(main.email_db, "get_sender_addresses_for_created_date", return_value=[
-            "Analyst <analyst@example.com>",
-            "Other <foo@broker.com>",
-        ]):
-            arrived = main.all_expected_senders_arrived(allowed, main.BJT.localize(datetime(2026, 3, 16, 18, 0, 0)))
+        with patch.object(main, "get_briefing_session_start", return_value=main.BJT.localize(datetime(2026, 3, 15, 4, 0, 0))):
+            with patch.object(main.email_db, "get_sender_addresses_created_since", return_value=[
+                "Analyst <analyst@example.com>",
+                "Other <foo@broker.com>",
+            ]):
+                arrived = main.all_expected_senders_arrived(allowed, main.BJT.localize(datetime(2026, 3, 16, 18, 0, 0)))
 
         self.assertTrue(arrived)
+
+    def test_should_trigger_early_daily_reports_missing_sales_and_session_context(self):
+        import main
+
+        allowed = ["a@example.com", "b@example.com", "c@example.com"]
+        ref_time = main.BJT.localize(datetime(2026, 3, 18, 17, 0, 0))
+
+        with patch.object(main, "get_briefing_session_start", return_value=main.BJT.localize(datetime(2026, 3, 18, 4, 0, 0))):
+            with patch.object(main, "get_received_sender_matches_for_session", return_value={"a@example.com", "b@example.com"}):
+                should_run, reason = main.should_trigger_early_daily(
+                    allowed,
+                    {"early_quiet_minutes": 10, "early_min_new_emails": 3},
+                    ref_time,
+                )
+
+        self.assertFalse(should_run)
+        self.assertIn("白名单 sales 尚未在本轮 session 内全部到齐", reason)
+        self.assertIn("缺失=['c@example.com']", reason)
+
+    def test_should_trigger_early_daily_requires_quiet_period(self):
+        import main
+
+        allowed = ["a@example.com", "b@example.com", "c@example.com"]
+        ref_time = main.BJT.localize(datetime(2026, 3, 18, 17, 0, 0))
+
+        with patch.object(main, "get_briefing_session_start", return_value=main.BJT.localize(datetime(2026, 3, 18, 4, 0, 0))):
+            with patch.object(main, "get_received_sender_matches_for_session", return_value=set(allowed)):
+                with patch.object(main.email_db, "count_emails_created_since", return_value=3):
+                    with patch.object(main.email_db, "has_new_email_within_minutes", return_value=True):
+                        should_run, reason = main.should_trigger_early_daily(
+                            allowed,
+                            {"early_quiet_minutes": 10, "early_min_new_emails": 3},
+                            ref_time,
+                        )
+
+        self.assertFalse(should_run)
+        self.assertIn("最近 10 分钟仍有新邮件", reason)
+
+    def test_should_trigger_early_daily_succeeds_when_all_conditions_met(self):
+        import main
+
+        allowed = ["a@example.com", "b@example.com", "c@example.com"]
+        ref_time = main.BJT.localize(datetime(2026, 3, 18, 17, 0, 0))
+
+        with patch.object(main, "get_briefing_session_start", return_value=main.BJT.localize(datetime(2026, 3, 18, 4, 0, 0))):
+            with patch.object(main, "get_received_sender_matches_for_session", return_value=set(allowed)):
+                with patch.object(main.email_db, "count_emails_created_since", return_value=4):
+                    with patch.object(main.email_db, "has_new_email_within_minutes", return_value=False):
+                        should_run, reason = main.should_trigger_early_daily(
+                            allowed,
+                            {"early_quiet_minutes": 10, "early_min_new_emails": 3},
+                            ref_time,
+                        )
+
+        self.assertTrue(should_run)
+        self.assertIn("满足 early run 条件", reason)
+
+    def test_get_briefing_session_start_handles_weekend_rollover(self):
+        import main
+
+        monday_pre_market_bjt = main.BJT.localize(datetime(2026, 3, 16, 18, 0, 0))
+        session_start = main.get_briefing_session_start(monday_pre_market_bjt)
+
+        self.assertEqual(session_start.strftime("%Y-%m-%d %H:%M:%S"), "2026-03-14 04:00:00")
+
+    def test_trigger_supplement_analysis_requires_daily_first(self):
+        import main
+
+        async def run_case():
+            with patch.object(main, "has_daily_report_sent_today", return_value=False):
+                with patch.object(main, "runtime_print") as rp:
+                    with patch.object(main, "get_analysis_task_lock", return_value=asyncio.Lock()):
+                        with patch.object(main.email_db, "get_pending_emails") as get_pending:
+                            await main.trigger_supplement_analysis(1)
+            return rp, get_pending
+
+        rp, get_pending = asyncio.run(run_case())
+        get_pending.assert_not_called()
+        rp.assert_any_call("   ⏭️ 今日尚未发送 daily 报告，跳过 supplement")
 
     def test_clean_extracted_attachment_text_strips_links_and_disclaimer(self):
         import main
@@ -919,7 +1010,7 @@ class SmokeTests(unittest.TestCase):
         self.assertIn(f"<h1>AI Morning Brief | {today}</h1>", formatted)
         self.assertNotIn("March 17, 2026", formatted)
         self.assertIn("Prepared by: AI Research Assistant", formatted)
-        self.assertIn("Source: Whitelisted analyst emails", formatted)
+        self.assertIn("Source: Whitelisted source emails", formatted)
         self.assertIn("Reading time:", formatted)
 
     def test_format_html_report_injects_meta_with_sources(self):

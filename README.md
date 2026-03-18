@@ -12,10 +12,10 @@
 
 ### 业务功能
 
-- 📧 **邮件收取**：通过 IMAP 自动过滤出重点关注的卖方邮件
+- 📧 **邮件收取**：通过IMAP自动过滤出重点关注的卖方邮件
 - 📎 **智能解析**：自动解析邮件正文和附件，支持.msg, .pdf, .docx, .txt格式的附件
-- 🤖 **AI分析**：调用大模型分析卖方邮件，提炼主线、市场态度与 thesis
-- 📊 **报告生成**：生成专业 HF Morning Brief 格式报告
+- 🤖 **AI分析**：调用大模型分析卖方邮件，提炼主线、市场态度与 thesis等
+- 📊 **报告生成**：生成专业 AI Morning Brief 格式报告
 - 📤 **自动发送**：通过 SMTP 自动发送报告到指定邮箱
 
 ### 系统特性
@@ -24,10 +24,15 @@
 - 🧹 **上下文优化与多模态理解**：自动裁掉邮件尾部署名/免责声明，并将图片附件走多模态输入
 - 🔀 **容错分析链路**：主模型短重试后自动切备用模型；超长输入会拆批分析后再合并
 - 🧠 **角色化研究输出**：支持按不同使用者角色配置研究视角与晨报口径
+- ⏰ **自动模式调度**：`main.py` 可按固定频率轮询收件箱，并在盘前窗口内自动触发 `daily / supplement`
+- 🪟 **Session 感知的 early run**：只在本轮 briefing session 内白名单 sales 全部到齐、邮件数足够且 quiet period 满足时提前触发
+- 🧾 **实时运行日志**：自动收件、触发判断、`qclaw_mail_file.py` 子进程输出都会实时写入 `main_runtime.log`
+- 🔒 **单实例分析保护**：自动模式下避免重复触发多个分析子进程，降低并发重入导致的状态冲突
+- 🏷️ **机构来源识别**：报告头部 `Source` 优先显示本轮内容里识别到的机构来源（如 `MS + JPM + BofA`），而不是转发邮箱本身
 
 ## 报告内容
 
-基于角色指南（Persona）生成高效简炼的高效简炼：详见 [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
+基于角色指南（Persona）生成高效简练的 HF Morning Brief：详见 [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
 
 
 ##### 报告结构 #####
@@ -45,7 +50,7 @@
 
 面向投研使用者：
 - 关注的投行/分析师列表：支持后缀匹配（`@morganstanley.com`）或精确匹配（`analyst@gs.com`）
-- 关注的板块/公司：迭代中，敬请期待
+- 关注的板块/公司：支持全局提权配置（迭代中，敬请期待）
 
 ## 项目结构
 
@@ -127,6 +132,22 @@ python qclaw_mail_file.py
 
 ## 使用方式
 
+### 自动模式
+
+```bash
+# 启动后台自动模式（轮询收件 + 自动触发分析）
+python main.py
+
+# 实时查看自动模式日志
+tail -f main_runtime.log
+```
+
+自动模式下：
+- 系统会按 `background.interval_minutes` 轮询收件箱
+- 到固定 DDL 时，只要有 `pending` 邮件就会触发 `daily`
+- 如果在盘前窗口内，本轮 session 里的白名单 sales 已全部到齐，且最近一段时间没有新邮件，也会提前触发 `daily`
+- `daily` 发出后，开盘后窗口内的新白名单邮件会进入 `supplement`
+
 ### 命令行选项
 
 ```bash
@@ -173,6 +194,12 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **第三备用模型示例**：`gpt-5.4 + supports_vision: true + reasoning_effort: medium`
 - **切换策略**：主模型未配置可用 key 或调用失败时，系统会自动尝试 `llm_backup`、`llm_backup2`，再尝试 `llm_backup3`
 
+当前默认链路是：
+- `Qwen3-Max`
+- `国内 Kimi-2.5`
+- `海外 Kimi-2.5`
+- `GPT-5.4`
+
 ## 安全注意事项
 
 ### 1. API 密钥保护
@@ -210,11 +237,21 @@ A: 检查 API 密钥是否正确，账户是否有足够配额
 A: 这是大模型 HTML 输出结构漂移导致的。当前 `save_report()` 已内建标题日期统一、伪小标题提升、提示框/标签标准化等后处理，但仍建议保留 smoke test 与人工 review。
 
 **Q: 系统的收发 DDL 和补发逻辑是怎样的？**
-A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。如果白名单分析师邮件提前全部到齐，系统会更早发送 `daily`；如果直到 DDL 仍未到齐，也不会继续等待。`daily` 发出后，若在开盘后 1 小时内收到新的白名单邮件，系统会走 `supplement` 补充分析并单独重试发送。
+A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。如果本轮 briefing session 里白名单 sales 已全部到齐，且最近一段时间没有新邮件，系统会更早发送 `daily`；如果直到 DDL 仍未到齐，也不会继续等待。`daily` 发出后，若在开盘后 1 小时内收到新的白名单邮件，系统会走 `supplement` 补充分析并单独重试发送。
+
+**Q: 自动模式日志怎么看？**
+A: 运行 `python main.py` 后，后台轮询、白名单命中、`early run / DDL / supplement` 判断，以及 `qclaw_mail_file.py` 子进程输出，都会实时写进 `main_runtime.log`。最方便的查看方式是：
+
+```bash
+tail -f main_runtime.log
+```
+
+**Q: 报告里的 `Source` 指什么？**
+A: `Source` 优先展示本次邮件内容里识别出来的机构来源标签（如 `MS + JPM + BofA`）。
 
 ## 最新进展
 
-### 今日已完成的优化
+### 0318已完成的优化
 
 - 服务端鉴权与白名单配置已改为按请求读取最新配置，便于联调时热更新 `allowed_senders`
 - 邮件收取、待处理状态、已发送记录统一落 SQLite，避免“分析对象”和“标记对象”错位
@@ -223,10 +260,16 @@ A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。
 - 当上下文仍然偏长时，系统会先拆成两个子批次生成结构化 JSON 摘要，再做二次合并生成最终晨报
 - 中间摘要新增 `fact_subject / opinion_subject / info_type / source_evidence`，用于约束“事实/观点分离”和“真实主语归因”
 - SMTP 发送支持 `587 + STARTTLS` 和 `465 + SSL`，并新增显式 timeout 与错误分类
+- 默认模型链已更新为 `Qwen3-Max -> 国内 Kimi-2.5 -> 海外 Kimi-2.5 -> GPT-5.4`
+- 自动模式支持单实例运行、实时轮询日志、子进程输出透传到 `main_runtime.log`
+- `early run` 已切为 session-aware 逻辑：按最近一个美股收盘后定义 briefing session，并结合白名单 sales、邮件数阈值和 quiet period 判断是否提前触发
+- 收件过滤不再依赖“昨天~今天”的自然日窗口，而是基于 `received_after_local + 白名单` 做更稳定的候选邮件选择
+- 报告头部 `Source` 已改成“内容来源优先”，优先展示邮件内容里识别出的机构标签，而不是转发邮箱或个人发件人名
 - 定时分析与补充分析窗口改为按真实 `America/New_York` 时区计算，并自动跳过周末
-- 当天白名单分析师邮件如果已全部到齐，会提前触发 daily；否则继续等到盘前 15 分钟 DDL
+- 自动模式已支持单实例后台运行、定时轮询收件、实时打印日志，并自动调用 `qclaw_mail_file.py` 完成分析与发送
+- `early daily` 逻辑已升级为 session-aware：本轮 session 内白名单 sales 到齐、邮件数足够且 quiet period 满足时才提前触发；否则继续等到盘前 15 分钟 DDL
 
-### 今日已验证的流程
+### 0318已验证的流程
 
 - 白名单正向邮件收取、分析、生成报告、自动发送
 - 非白名单邮件会进入 inbox，但被系统正确忽略
@@ -235,14 +278,15 @@ A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。
 - Gmail / Outlook 两个白名单发件人都已完成真实联调
 - `qwen3-max + supports_vision: true` 与 `qwen-vl-max + supports_vision: true` 已完成真实多模态联调：图片附件与正文内嵌图片都能被提取成多模态输入并成功生成/发送报告
 - 多级备用模型切换已验证：主模型失败后可继续尝试 `llm_backup` / `llm_backup2` / `llm_backup3`
-- `early daily` 已验证：白名单分析师全部到齐后，会在 DDL 前提前发送 `daily`
+- `early daily` 已验证：本轮 session 内白名单 sales 全部到齐后，会在 DDL 前提前发送 `daily`
 - `supplement` 已验证：`daily` 提前发送后，新增白名单邮件会先保持 `pending`，进入 supplement window 后再单独发送 `supplement`
+- 自动模式日志已补齐时间戳、收件起点、白名单命中、session 状态、触发原因与子进程输出，更适合演示和排障
 
 ### 待优化项
 
 - 接入美股节假日休市日历
 - 大批量邮件 / 长附件压力场景验证与优化
-- 长上下文拆批时，图片信息目前只在子批次阶段做多模态理解，合并阶段可能出现图像 insight 衰减；后续可考虑补充更显式的 image insights / image evidence 保留机制
+- 图片多模态异步处理流程
 
 
 ## License

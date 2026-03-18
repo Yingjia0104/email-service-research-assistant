@@ -12,8 +12,8 @@ Business Functions:
 
 - 📧 **Email Receiving**: IMAP-based filtering of targeted sell-side emails
 - 📎 **Smart Parsing**: Auto-parse email body and attachments (.msg, .pdf, .docx, .txt)
-- 🤖 **AI Analysis**: Use an LLM to extract the key market narrative, stance, and thesis from sell-side emails
-- 📊 **Report Generation**: Generate professional HF Morning Brief format reports
+- 🤖 **AI Analysis**: Use an LLM to extract the key market narrative, stance, thesis, and core takeaways from sell-side emails
+- 📊 **Report Generation**: Generate professional AI Morning Brief format reports
 - 📤 **Auto Send**: Auto-send reports via SMTP to designated email
 
 System Traits:
@@ -22,6 +22,11 @@ System Traits:
 - 🧹 **Context Optimization**: Automatically trims signatures/disclaimers, strips inline image/base64 noise, and sends image attachments through multimodal input
 - 🔀 **Fault-Tolerant Analysis**: Primary model short-retries, then falls back to backup model; long batches are split and merged
 - 🧠 **Persona-Based Research Output**: Supports configurable research personas for different end users and briefing styles
+- ⏰ **Automatic Scheduling**: `main.py` can poll the inbox on a fixed interval and trigger `daily / supplement` automatically in the pre-market window
+- 🪟 **Session-Aware Early Run**: Supports early triggering after whitelisted sales emails in the current briefing session have fully arrived
+- 🧾 **Real-Time Runtime Logs**: inbox polling, trigger decisions, and `qclaw_mail_file.py` child-process output are streamed into `main_runtime.log`
+- 🔒 **Single-Instance Analysis Protection**: Automatic mode prevents duplicate analysis subprocesses from running at the same time
+- 🏷️ **Institution-First Source Labels**: The report header prefers institution labels recognized from the content itself (for example `MS + JPM + BofA`) rather than just the forwarding mailbox
 
 ## Report Content
 
@@ -40,7 +45,7 @@ Generated reports follow an efficient format:
 For investment users:
 
 - Target investment banks/analysts list: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
-- Sector/company focus: still evolving, reserved for future iterations
+- Sector/company focus: reserved for future global-priority configuration
 - Persona guidance: see [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
 
 For product / system setup:
@@ -125,6 +130,22 @@ python qclaw_mail_file.py
 
 ## Usage
 
+### Automatic Mode
+
+```bash
+# Start background automatic mode (poll inbox + auto-trigger analysis)
+python main.py
+
+# Watch automatic-mode logs in real time
+tail -f main_runtime.log
+```
+
+In automatic mode:
+- the system polls the inbox according to `background.interval_minutes`
+- at the fixed DDL, any `pending` mail triggers `daily`
+- during the pre-market window, `daily` can trigger early if all whitelisted sales in the current session have arrived and no new email has landed during the recent quiet period
+- after `daily` is sent, new whitelisted mail in the post-open window flows into `supplement`
+
 ### Command Line Options
 
 ```bash
@@ -161,7 +182,7 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 - **LLM**: Generic LLM routing across Moonshot / OpenAI / MiniMax / MiMo / Sonnet style providers
 - **Document Parsing**: extract-msg, PyPDF2, python-docx
 
-### Recommended LLM
+## LLM
 
 The default example now uses `Qwen3-Max` as the primary model, with `domestic Kimi + overseas Kimi + GPT-5.4` as three backup layers:
 
@@ -170,6 +191,12 @@ The default example now uses `Qwen3-Max` as the primary model, with `domestic Ki
 - **Second backup example**: `kimi-k2.5 + supports_vision: true`
 - **Third backup example**: `gpt-5.4 + supports_vision: true + reasoning_effort: medium`
 - **Fallback behavior**: if the primary model has no usable key or fails at runtime, the system automatically tries `llm_backup`, then `llm_backup2`, then `llm_backup3`
+
+The current default chain is:
+- `Qwen3-Max`
+- `Domestic Kimi-2.5`
+- `Overseas Kimi-2.5`
+- `GPT-5.4`
 
 ## Security Notes
 
@@ -208,11 +235,21 @@ A: Check API key correctness and account quota
 A: Because the raw HTML still comes from an LLM. The project now includes HTML normalization for title dates, pseudo-headings, and action boxes, but smoke tests and manual review are still recommended.
 
 **Q: How do the `daily` deadline and retry rules work?**
-A: By default, the system treats “15 minutes before the US market opens” as the `daily` send/receive DDL. If all expected whitelist senders arrive earlier, it can send `daily` before that point; if they have not all arrived by the DDL, it stops waiting and sends anyway. After `daily` has been sent, any new whitelist email received within 1 hour after the market opens is handled through `supplement`, which retries analysis and sends a separate supplemental brief.
+A: By default, the system treats “15 minutes before the US market opens” as the `daily` send/receive DDL. During the current briefing session, if all whitelisted sales have already arrived and the recent quiet period has been satisfied, it can send `daily` before that point; if they have not all arrived by the DDL, it stops waiting and sends anyway. After `daily` has been sent, any new whitelist email received within 1 hour after the market opens is handled through `supplement`, which retries analysis and sends a separate supplemental brief.
+
+**Q: How do I watch automatic-mode logs?**
+A: After running `python main.py`, inbox polling, whitelist matches, `early run / DDL / supplement` decisions, and `qclaw_mail_file.py` child-process output are all written into `main_runtime.log`. The easiest way to watch it is:
+
+```bash
+tail -f main_runtime.log
+```
+
+**Q: What does `Source` mean in the report header?**
+A: `Source` tries to show the institution labels recognized from the actual content in this run (for example `MS + JPM + BofA`), not just the mailbox that forwarded or triggered the run. It only falls back to a generic source label when no institution can be confidently recognized.
 
 ## Latest Progress
 
-### Optimizations Completed Today
+### Optimizations Completed on 0318
 
 - Request-time config reload now applies to auth and sender allowlists, so `allowed_senders` can be hot-updated during testing
 - Email ingestion, pending state, and sent-report history now live in SQLite to avoid analysis/marking mismatches
@@ -221,8 +258,13 @@ A: By default, the system treats “15 minutes before the US market opens” as 
 - If context is still too large, the system first generates structured JSON summaries per sub-batch and then merges them into the final brief
 - Intermediate summaries now carry `fact_subject / opinion_subject / info_type / source_evidence` to preserve attribution and separate facts from quoted opinions
 - SMTP supports both `587 + STARTTLS` and `465 + SSL`, with explicit timeout and clearer error classification
+- The default chain is now `Qwen3-Max -> Domestic Kimi-2.5 -> Overseas Kimi-2.5 -> GPT-5.4`
+- Automatic mode now supports single-instance polling, real-time runtime logs, and child-process streaming into `main_runtime.log`
+- Early `daily` triggering now uses a session-aware policy tied to the most recent US market close, whitelist-sales coverage, and quiet-period checks
+- Email ingestion no longer relies on a coarse natural-day window and instead uses `received_after_local + whitelist` for more stable candidate selection
+- Report-header `Source` now prefers institution labels inferred from the actual content rather than personal sender names or forwarding mailboxes
 - Market trigger time and supplement window now use real `America/New_York` timezone handling and skip weekends
-- If all whitelisted analysts have already sent their emails for the day, the system sends the `daily` report early; otherwise it waits for the pre-market DDL
+- `early daily` is now session-aware: all whitelisted sales in the current session must have arrived, enough session mail must exist, and the quiet period must be satisfied; otherwise the system waits for the pre-market DDL
 
 ### Flows Verified Today
 
@@ -235,6 +277,7 @@ A: By default, the system treats “15 minutes before the US market opens” as 
 - Multi-level fallback verified: the system can continue from the primary model to `llm_backup` / `llm_backup2` / `llm_backup3` when needed
 - `early daily` verified: once all expected whitelist senders have arrived, `daily` is sent before the DDL
 - `supplement` verified: after `daily` is sent early, new whitelist mail remains `pending` first and is later sent separately during the supplement window
+- Automatic-mode logs now include timestamps, receive-start cutoff, whitelist/session state, trigger reasons, and child-process output, which makes both demos and troubleshooting much easier
 
 ### Future Optimization Items
 
