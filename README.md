@@ -89,6 +89,7 @@ cp config.yaml.example config.yaml
 - `llm.api_key` / `llm.api_key_env`: 主模型 API 密钥或环境变量名
 - `llm_backup.api_key`: 第一备用模型密钥（可选但强烈建议）
 - `llm_backup2.api_key` / `llm_backup2.api_key_env`: 第二备用模型密钥（可选）
+- `llm_backup3.api_key` / `llm_backup3.api_key_env`: 第三备用模型密钥（可选）
 - `imap.email` / `imap.password`: 收件邮箱和应用专用密码
 
 **完整闭环（收信 + 分析 + 自动发送报告）时额外配置：**
@@ -164,12 +165,13 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 
 ## LLM
 
-当前默认示例是 `Kimi` 作为主模型，另配 `Kimi + GPT-5.4` 两级备用：
+当前默认示例是 `Qwen3-Max` 作为主模型，另配 `国内 Kimi + 海外 Kimi + GPT-5.4` 三级备用：
 
-- **主模型示例**：`kimi-k2.5 + supports_vision: true`
+- **主模型示例**：`qwen3-max + supports_vision: true`
 - **第一备用模型示例**：`kimi-k2.5 + supports_vision: true`
-- **第二备用模型示例**：`gpt-5.4 + supports_vision: true + reasoning_effort: medium`
-- **切换策略**：主模型未配置可用 key 或调用失败时，系统会自动尝试 `llm_backup`，再尝试 `llm_backup2`
+- **第二备用模型示例**：`kimi-k2.5 + supports_vision: true`
+- **第三备用模型示例**：`gpt-5.4 + supports_vision: true + reasoning_effort: medium`
+- **切换策略**：主模型未配置可用 key 或调用失败时，系统会自动尝试 `llm_backup`、`llm_backup2`，再尝试 `llm_backup3`
 
 ## 安全注意事项
 
@@ -231,8 +233,8 @@ A: 默认把“美股开盘前 15 分钟”作为当天 `daily` 的收发 DDL。
 - 幂等性成立：没有新 `pending` 时不会重复分析和重复生成报告
 - `.txt`、`.pdf`、图片附件已完成真实联调
 - Gmail / Outlook 两个白名单发件人都已完成真实联调
-- `kimi-k2.5 + supports_vision: true` 已完成真实多模态联调：图片附件与正文内嵌图片都能被提取成多模态输入并成功生成/发送报告
-- 多级备用模型切换已验证：主模型失败后可继续尝试 `llm_backup` / `llm_backup2`
+- `qwen3-max + supports_vision: true` 与 `qwen-vl-max + supports_vision: true` 已完成真实多模态联调：图片附件与正文内嵌图片都能被提取成多模态输入并成功生成/发送报告
+- 多级备用模型切换已验证：主模型失败后可继续尝试 `llm_backup` / `llm_backup2` / `llm_backup3`
 - `early daily` 已验证：白名单分析师全部到齐后，会在 DDL 前提前发送 `daily`
 - `supplement` 已验证：`daily` 提前发送后，新增白名单邮件会先保持 `pending`，进入 supplement window 后再单独发送 `supplement`
 

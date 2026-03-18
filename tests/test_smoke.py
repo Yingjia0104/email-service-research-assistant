@@ -34,7 +34,9 @@ class SmokeTests(unittest.TestCase):
         with open(cfg_path, "r", encoding="utf-8") as f:
             text = f.read()
         self.assertNotIn("sk-", text)
-        self.assertIn('model: "kimi-k2.5"', text)
+        self.assertIn('model: "qwen3-max"', text)
+        self.assertIn('model: "gpt-5.4"', text)
+        self.assertIn('base_url: "https://api.moonshot.ai/v1"', text)
         self.assertIn('api_key_env: "OPENAI_API_KEY"', text)
         self.assertIn("supports_vision: true", text)
 
@@ -368,7 +370,7 @@ class SmokeTests(unittest.TestCase):
             qclaw_mail_file.LLM_BACKUP_CONFIG.update(real_cfg)
             return {"api_key": "primary-key", "base_url": "https://primary.example/v1", "model": "primary-model"}
 
-        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None):
+        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None, **kwargs):
             calls.append(api_config["base_url"])
             if api_config["base_url"] == "https://primary.example/v1":
                 raise RuntimeError("network down")
@@ -447,7 +449,7 @@ class SmokeTests(unittest.TestCase):
                 "reasoning_effort": "medium",
             }
 
-        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None):
+        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None, **kwargs):
             calls.append(api_config["base_url"])
             return """{
               "executive_summary": {"market_background": "背景", "key_signals": ["信号"]},
@@ -498,7 +500,7 @@ class SmokeTests(unittest.TestCase):
                 "supports_vision": True,
             }
 
-        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None):
+        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None, **kwargs):
             calls.append(api_config["base_url"])
             return """{
               "executive_summary": {"market_background": "背景", "key_signals": ["信号"]},
@@ -514,6 +516,63 @@ class SmokeTests(unittest.TestCase):
 
         self.assertIn("Executive Summary", result)
         self.assertEqual(calls, ["https://backup2.example/v1"])
+
+    def test_missing_primary_backup1_backup2_skips_to_backup3(self):
+        import qclaw_mail_file
+
+        emails = [{
+            "subject": "s",
+            "from_name": "n",
+            "from": "a@example.com",
+            "date": "2026-03-16 00:00:00+08:00",
+            "body": "b",
+        }]
+        calls = []
+
+        def fake_load():
+            qclaw_mail_file.LLM_BACKUP_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP_CONFIG.update({
+                "api_key": "",
+                "base_url": "https://backup1.example/v1",
+                "model": "backup1-model",
+            })
+            qclaw_mail_file.LLM_BACKUP2_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP2_CONFIG.update({
+                "api_key": "",
+                "base_url": "https://backup2.example/v1",
+                "model": "backup2-model",
+            })
+            qclaw_mail_file.LLM_BACKUP3_CONFIG.clear()
+            qclaw_mail_file.LLM_BACKUP3_CONFIG.update({
+                "api_key": "backup3-key",
+                "base_url": "https://backup3.example/v1",
+                "model": "gpt-5.4",
+                "supports_vision": True,
+                "reasoning_effort": "medium",
+            })
+            return {
+                "api_key": "",
+                "base_url": "https://primary.example/v1",
+                "model": "qwen3-max",
+                "supports_vision": True,
+            }
+
+        def fake_call(api_config, system_prompt, user_prompt, user_content_blocks=None, **kwargs):
+            calls.append(api_config["base_url"])
+            return """{
+              "executive_summary": {"market_background": "背景", "key_signals": ["信号"]},
+              "core_events": [],
+              "local_news": [],
+              "peripheral_intelligence": {"mapped_events": [], "cross_market_signals": []},
+              "actionable_ideas": {"short_term": [], "medium_term": [], "catalysts": [], "bottom_line": "结论"}
+            }"""
+
+        with patch.object(qclaw_mail_file, "load_llm_config", side_effect=fake_load):
+            with patch.object(qclaw_mail_file, "call_llm_api", side_effect=fake_call):
+                result = qclaw_mail_file.analyze_emails_with_llm(emails)
+
+        self.assertIn("Executive Summary", result)
+        self.assertEqual(calls, ["https://backup3.example/v1"])
 
     def test_generate_with_llm_pins_to_successful_backup_within_same_run(self):
         import qclaw_mail_file
@@ -618,10 +677,10 @@ class SmokeTests(unittest.TestCase):
         import qclaw_mail_file
 
         emails = [{
-            "subject": "img",
+            "subject": "management tweet screenshot",
             "attachments": json.dumps([
                 {
-                    "filename": "chart.png",
+                    "filename": "twitter_post_screenshot.png",
                     "content_type": "image/png",
                     "size": 128,
                     "kind": "image",
@@ -637,25 +696,8 @@ class SmokeTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 2)
         self.assertEqual(blocks[0]["type"], "text")
-        self.assertIn("chart.png", blocks[0]["text"])
+        self.assertIn("twitter_post_screenshot.png", blocks[0]["text"])
         self.assertEqual(blocks[1]["type"], "image_url")
-        self.assertEqual(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA")
-
-    def test_build_multimodal_user_blocks_uses_inline_body_images(self):
-        import qclaw_mail_file
-
-        emails = [{
-            "subject": "inline img",
-            "body": "<p>chart</p><img src=\"data:image/png;base64,AAAA\">",
-        }]
-
-        blocks = qclaw_mail_file.build_multimodal_user_blocks(
-            emails,
-            {"model": "kimi-k2.5", "supports_vision": True},
-        )
-
-        self.assertEqual(len(blocks), 2)
-        self.assertIn("正文中的图片", blocks[0]["text"])
         self.assertEqual(blocks[1]["image_url"]["url"], "data:image/png;base64,AAAA")
 
     def test_build_multimodal_user_blocks_dedupes_attachment_and_inline_image(self):
@@ -682,13 +724,13 @@ class SmokeTests(unittest.TestCase):
 
         self.assertEqual(len(blocks), 2)
 
-    def test_build_multimodal_user_blocks_no_longer_caps_image_count(self):
+    def test_build_multimodal_user_blocks_caps_image_count_at_eight(self):
         import qclaw_mail_file
 
         attachments = []
-        for idx in range(8):
+        for idx in range(12):
             attachments.append({
-                "filename": f"chart{idx}.png",
+                "filename": f"screenshot{idx}.png",
                 "content_type": "image/png",
                 "size": 128,
                 "kind": "image",
@@ -705,7 +747,7 @@ class SmokeTests(unittest.TestCase):
             {"model": "kimi-k2.5", "supports_vision": True},
         )
 
-        self.assertEqual(len(blocks), 16)
+        self.assertEqual(len(blocks), qclaw_mail_file.MAX_MULTIMODAL_IMAGES * 2)
 
     def test_call_llm_api_sends_multimodal_payload(self):
         import qclaw_mail_file
@@ -715,8 +757,10 @@ class SmokeTests(unittest.TestCase):
             "choices": [{"message": {"content": "<html><body>ok</body></html>"}}]
         }
         fake_resp.raise_for_status.return_value = None
+        fake_session = Mock()
+        fake_session.post.return_value = fake_resp
 
-        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+        with patch.object(qclaw_mail_file, "get_llm_http_session", return_value=fake_session):
             result = qclaw_mail_file.call_llm_api(
                 {"api_key": "k", "base_url": "https://api.moonshot.cn/v1", "model": "kimi-k2.5"},
                 "system",
@@ -728,7 +772,7 @@ class SmokeTests(unittest.TestCase):
             )
 
         self.assertIn("ok", result)
-        _, kwargs = post.call_args
+        _, kwargs = fake_session.post.call_args
         messages = kwargs["json"]["messages"]
         self.assertIsInstance(messages[1]["content"], list)
         self.assertEqual(messages[1]["content"][0], {"type": "text", "text": "user prompt"})
@@ -742,8 +786,10 @@ class SmokeTests(unittest.TestCase):
             "choices": [{"message": {"content": "{\"ok\": true}"}}]
         }
         fake_resp.raise_for_status.return_value = None
+        fake_session = Mock()
+        fake_session.post.return_value = fake_resp
 
-        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+        with patch.object(qclaw_mail_file, "get_llm_http_session", return_value=fake_session):
             qclaw_mail_file.call_llm_api(
                 {
                     "api_key": "k",
@@ -756,7 +802,7 @@ class SmokeTests(unittest.TestCase):
                 "user prompt",
             )
 
-        _, kwargs = post.call_args
+        _, kwargs = fake_session.post.call_args
         payload = kwargs["json"]
         self.assertEqual(payload["max_completion_tokens"], qclaw_mail_file.MAX_COMPLETION_TOKENS)
         self.assertEqual(payload["reasoning_effort"], "medium")
@@ -772,8 +818,10 @@ class SmokeTests(unittest.TestCase):
         }
         fake_resp.raise_for_status.return_value = None
         response_format = qclaw_mail_file.build_report_response_format()
+        fake_session = Mock()
+        fake_session.post.return_value = fake_resp
 
-        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+        with patch.object(qclaw_mail_file, "get_llm_http_session", return_value=fake_session):
             qclaw_mail_file.call_llm_api(
                 {
                     "api_key": "k",
@@ -786,7 +834,7 @@ class SmokeTests(unittest.TestCase):
                 response_format=response_format,
             )
 
-        _, kwargs = post.call_args
+        _, kwargs = fake_session.post.call_args
         self.assertEqual(kwargs["json"]["response_format"], response_format)
 
     def test_call_llm_api_ignores_json_schema_response_format_for_non_openai_provider(self):
@@ -797,8 +845,10 @@ class SmokeTests(unittest.TestCase):
             "choices": [{"message": {"content": "{\"ok\": true}"}}]
         }
         fake_resp.raise_for_status.return_value = None
+        fake_session = Mock()
+        fake_session.post.return_value = fake_resp
 
-        with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+        with patch.object(qclaw_mail_file, "get_llm_http_session", return_value=fake_session):
             qclaw_mail_file.call_llm_api(
                 {
                     "api_key": "k",
@@ -811,8 +861,35 @@ class SmokeTests(unittest.TestCase):
                 response_format=qclaw_mail_file.build_report_response_format(),
             )
 
-        _, kwargs = post.call_args
+        _, kwargs = fake_session.post.call_args
         self.assertNotIn("response_format", kwargs["json"])
+
+    def test_moonshot_cn_uses_direct_session(self):
+        import qclaw_mail_file
+
+        selected = qclaw_mail_file.get_llm_http_session(
+            {"base_url": "https://api.moonshot.cn/v1", "model": "kimi-k2.5"}
+        )
+
+        self.assertIs(selected, qclaw_mail_file.session)
+
+    def test_dashscope_uses_direct_session(self):
+        import qclaw_mail_file
+
+        selected = qclaw_mail_file.get_llm_http_session(
+            {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max"}
+        )
+
+        self.assertIs(selected, qclaw_mail_file.session)
+
+    def test_gpt_backup_uses_proxy_session(self):
+        import qclaw_mail_file
+
+        selected = qclaw_mail_file.get_llm_http_session(
+            {"base_url": "https://api.gptsapi.net/v1", "model": "gpt-5.4"}
+        )
+
+        self.assertIs(selected, qclaw_mail_file.proxy_session)
 
     def test_split_emails_for_analysis_when_context_too_long(self):
         import qclaw_mail_file

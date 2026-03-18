@@ -4,22 +4,30 @@
 # API密钥 (调用接口需要)
 api_key: "your-secret-key"
 
-# 主模型配置（示例：Moonshot / OpenAI / 其他兼容 Chat Completions 的 LLM）
+# 主模型配置（默认示例：Qwen3-Max）
 llm:
   api_key: "your-primary-llm-api-key"
-  base_url: "https://api.moonshot.cn/v1"
-  model: "kimi-k2.5"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen3-max"
   supports_vision: true
 
-# 第一备用模型配置
+# 第一备用模型配置（默认示例：国内 Kimi）
 llm_backup:
   api_key: "your-backup-api-key"
   base_url: "https://api.moonshot.cn/v1"
   model: "kimi-k2.5"
   supports_vision: true
 
-# 第二备用模型配置（示例：OpenAI GPT-5.4）
+# 第二备用模型配置（默认示例：海外 Kimi）
 llm_backup2:
+  api_key: "your-backup2-api-key"
+  api_key_env: ""
+  base_url: "https://api.moonshot.ai/v1"
+  model: "kimi-k2.5"
+  supports_vision: true
+
+# 第三备用模型配置（默认示例：GPT-5.4）
+llm_backup3:
   api_key: ""
   api_key_env: "OPENAI_API_KEY"
   base_url: "https://api.openai.com/v1"

@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Any, List, Dict, Optional, Tuple
 from functools import wraps
 from io import BytesIO
+from urllib.parse import urlparse
 
 # ============ 配置 ============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,23 +54,30 @@ BJT = pytz.timezone('Asia/Shanghai')
 # 邮件服务API
 EMAIL_API = "http://127.0.0.1:8877"
 
-# 主模型 API 配置（兼容 OpenAI / Moonshot 等 Chat Completions 风格接口）
+# 主模型 API 配置（兼容 DashScope / Moonshot / OpenAI 等 Chat Completions 风格接口）
 LLM_CONFIG = {
     "api_key": "",
-    "base_url": "https://api.moonshot.cn/v1",
-    "model": "kimi-k2.5",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3-max",
     "supports_vision": True,
 }
 
 # 备用 API 配置
 LLM_BACKUP_CONFIG = {
     "api_key": "",
-    "base_url": "https://api.moonshot.cn/v1",
-    "model": "kimi-k2.5",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen-vl-max",
     "supports_vision": True,
 }
 
 LLM_BACKUP2_CONFIG = {
+    "api_key": "",
+    "base_url": "https://api.moonshot.ai/v1",
+    "model": "kimi-k2.5",
+    "supports_vision": True,
+}
+
+LLM_BACKUP3_CONFIG = {
     "api_key": "",
     "api_key_env": "OPENAI_API_KEY",
     "base_url": "https://api.openai.com/v1",
@@ -82,6 +90,7 @@ LLM_BACKUP2_CONFIG = {
 KIMI_CONFIG = LLM_CONFIG
 KIMI_BACKUP_CONFIG = LLM_BACKUP_CONFIG
 KIMI_BACKUP2_CONFIG = LLM_BACKUP2_CONFIG
+KIMI_BACKUP3_CONFIG = LLM_BACKUP3_CONFIG
 
 MAX_EMAIL_BODY_CHARS = 12000
 MAX_PROMPT_BODY_CHARS = 40000
@@ -89,6 +98,7 @@ MAX_COMPLETION_TOKENS = 12000
 BATCH_SPLIT_TRIGGER_CHARS = 26000
 MIN_TRUNCATION_CONTENT_CHARS = 40
 MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_MULTIMODAL_IMAGES = 8
 
 EMOJI_PATTERN = re.compile(
     "["
@@ -248,7 +258,14 @@ def setup_logging():
 logger = setup_logging()
 
 # ============ 代理设置 ============
-# 移除系统代理环境变量（本地服务不需要代理）
+# 先保留原始代理配置，后面按提供方决定是否使用。
+ORIGINAL_PROXY_ENV = {
+    key: os.environ.get(key)
+    for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']
+    if os.environ.get(key)
+}
+
+# 移除系统代理环境变量（本地服务 / 本地 HTTP API 不需要代理）
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
     os.environ.pop(key, None)
 
@@ -257,6 +274,15 @@ os.environ['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0'
 
 session = requests.Session()
 session.trust_env = False
+
+# 第三方 GPT 兼容入口依赖本地代理；这里显式继承我们在启动时捕获到的代理配置。
+proxy_session = requests.Session()
+proxy_session.trust_env = False
+proxy_session.proxies.update({
+    "http": ORIGINAL_PROXY_ENV.get("http_proxy") or ORIGINAL_PROXY_ENV.get("HTTP_PROXY"),
+    "https": ORIGINAL_PROXY_ENV.get("https_proxy") or ORIGINAL_PROXY_ENV.get("HTTPS_PROXY"),
+    "all": ORIGINAL_PROXY_ENV.get("ALL_PROXY"),
+})
 
 # 明确配置适配器，禁用代理
 from requests.adapters import HTTPAdapter
@@ -270,6 +296,25 @@ adapter = HTTPAdapter(
 )
 session.mount('http://', adapter)
 session.mount('https://', adapter)
+proxy_session.mount('http://', adapter)
+proxy_session.mount('https://', adapter)
+
+
+def llm_should_bypass_proxy(api_config: Dict[str, Any]) -> bool:
+    """按提供方选择网络策略。
+
+    当前经验规则：
+    - Moonshot 的 .cn 域名在这台机器上直连更稳定，避免代理层中断长请求。
+    - DashScope / 百炼兼容入口直连可用，优先避免代理增加额外不稳定性。
+    - 其他兼容 OpenAI 的入口（如第三方 GPT）允许走本地代理。
+    """
+    host = (urlparse(str((api_config or {}).get("base_url", "") or "")).hostname or "").lower()
+    return host.endswith("moonshot.cn") or host.endswith("dashscope.aliyuncs.com")
+
+
+def get_llm_http_session(api_config: Dict[str, Any]) -> requests.Session:
+    """返回当前 LLM 请求应使用的 HTTP session。"""
+    return session if llm_should_bypass_proxy(api_config) else proxy_session
 
 
 # ============ 重试装饰器 ============
@@ -327,8 +372,8 @@ def load_llm_config():
         LLM_CONFIG["api_key_env"] = primary_key_env
     else:
         LLM_CONFIG.pop("api_key_env", None)
-    LLM_CONFIG["base_url"] = llm_cfg.get("base_url", "https://api.moonshot.cn/v1")
-    LLM_CONFIG["model"] = llm_cfg.get("model", "kimi-k2.5")
+    LLM_CONFIG["base_url"] = llm_cfg.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    LLM_CONFIG["model"] = llm_cfg.get("model", "qwen3-max")
     reasoning_effort = str(llm_cfg.get("reasoning_effort", LLM_CONFIG.get("reasoning_effort", "")) or "").strip()
     if reasoning_effort:
         LLM_CONFIG["reasoning_effort"] = reasoning_effort
@@ -353,8 +398,8 @@ def load_llm_config():
         LLM_BACKUP_CONFIG["api_key_env"] = backup_key_env
     else:
         LLM_BACKUP_CONFIG.pop("api_key_env", None)
-    LLM_BACKUP_CONFIG["base_url"] = backup_cfg.get("base_url", "https://api.moonshot.cn/v1")
-    LLM_BACKUP_CONFIG["model"] = backup_cfg.get("model", "kimi-k2.5")
+    LLM_BACKUP_CONFIG["base_url"] = backup_cfg.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    LLM_BACKUP_CONFIG["model"] = backup_cfg.get("model", "qwen-vl-max")
     backup_reasoning_effort = str(backup_cfg.get("reasoning_effort", LLM_BACKUP_CONFIG.get("reasoning_effort", "")) or "").strip()
     if backup_reasoning_effort:
         LLM_BACKUP_CONFIG["reasoning_effort"] = backup_reasoning_effort
@@ -378,8 +423,8 @@ def load_llm_config():
         LLM_BACKUP2_CONFIG["api_key_env"] = backup2_key_env
     else:
         LLM_BACKUP2_CONFIG.pop("api_key_env", None)
-    LLM_BACKUP2_CONFIG["base_url"] = backup2_cfg.get("base_url", "https://api.openai.com/v1")
-    LLM_BACKUP2_CONFIG["model"] = backup2_cfg.get("model", "gpt-5.4")
+    LLM_BACKUP2_CONFIG["base_url"] = backup2_cfg.get("base_url", "https://api.moonshot.ai/v1")
+    LLM_BACKUP2_CONFIG["model"] = backup2_cfg.get("model", "kimi-k2.5")
     backup2_reasoning_effort = str(backup2_cfg.get("reasoning_effort", LLM_BACKUP2_CONFIG.get("reasoning_effort", "")) or "").strip()
     if backup2_reasoning_effort:
         LLM_BACKUP2_CONFIG["reasoning_effort"] = backup2_reasoning_effort
@@ -390,6 +435,31 @@ def load_llm_config():
     else:
         LLM_BACKUP2_CONFIG["supports_vision"] = any(
             token in LLM_BACKUP2_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
+        )
+
+    backup3_cfg = config.get("llm_backup3") or config.get("kimi_backup3", {})
+    backup3_key_env = str(backup3_cfg.get("api_key_env", LLM_BACKUP3_CONFIG.get("api_key_env", "")) or "").strip()
+    backup3_api_key = str(backup3_cfg.get("api_key", "") or "").strip()
+    if not backup3_api_key and backup3_key_env:
+        backup3_api_key = str(os.getenv(backup3_key_env, "") or "").strip()
+
+    LLM_BACKUP3_CONFIG["api_key"] = backup3_api_key
+    if backup3_key_env:
+        LLM_BACKUP3_CONFIG["api_key_env"] = backup3_key_env
+    else:
+        LLM_BACKUP3_CONFIG.pop("api_key_env", None)
+    LLM_BACKUP3_CONFIG["base_url"] = backup3_cfg.get("base_url", "https://api.openai.com/v1")
+    LLM_BACKUP3_CONFIG["model"] = backup3_cfg.get("model", "gpt-5.4")
+    backup3_reasoning_effort = str(backup3_cfg.get("reasoning_effort", LLM_BACKUP3_CONFIG.get("reasoning_effort", "")) or "").strip()
+    if backup3_reasoning_effort:
+        LLM_BACKUP3_CONFIG["reasoning_effort"] = backup3_reasoning_effort
+    else:
+        LLM_BACKUP3_CONFIG.pop("reasoning_effort", None)
+    if "supports_vision" in backup3_cfg:
+        LLM_BACKUP3_CONFIG["supports_vision"] = bool(backup3_cfg.get("supports_vision"))
+    else:
+        LLM_BACKUP3_CONFIG["supports_vision"] = any(
+            token in LLM_BACKUP3_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
         )
 
     return LLM_CONFIG
@@ -746,11 +816,13 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
 
     blocks: List[Dict[str, Any]] = []
     image_count = 0
+    total_images = 0
     seen_urls = set()
 
     for fallback_index, email in enumerate(emails, 1):
         email_index = email.get("_analysis_index", fallback_index)
         subject = email.get("subject", "") or "(无主题)"
+        body = email.get("body", "") or ""
         attachments = parse_attachment_list(email.get("attachments"))
 
         for attachment in attachments:
@@ -766,6 +838,10 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
                 continue
             compact_url = re.sub(r"\s+", "", data_url)
             if compact_url in seen_urls:
+                continue
+            total_images += 1
+            if image_count >= MAX_MULTIMODAL_IMAGES:
+                seen_urls.add(compact_url)
                 continue
 
             filename = attachment.get("filename", "image")
@@ -783,7 +859,7 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
             image_count += 1
             seen_urls.add(compact_url)
 
-        for inline_index, data_url in enumerate(extract_inline_body_image_data_urls(email.get("body", "")), 1):
+        for inline_index, data_url in enumerate(extract_inline_body_image_data_urls(body), 1):
             compact_url = re.sub(r"\s+", "", data_url)
             if compact_url in seen_urls:
                 continue
@@ -791,7 +867,10 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
             estimated_size = estimate_data_url_image_bytes(compact_url)
             if estimated_size and estimated_size > MAX_MULTIMODAL_IMAGE_BYTES:
                 continue
-
+            total_images += 1
+            if image_count >= MAX_MULTIMODAL_IMAGES:
+                seen_urls.add(compact_url)
+                continue
             blocks.append({
                 "type": "text",
                 "text": (
@@ -806,8 +885,11 @@ def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[s
             image_count += 1
             seen_urls.add(compact_url)
 
-    if image_count:
-        logger.info(f"🖼️ 本轮共识别到 {image_count} 张可用图片，已全部送入多模态分析")
+    if total_images:
+        logger.info(
+            f"🖼️ 本轮共识别到 {total_images} 张可用图片；"
+            f"按当前上限送入其中 {image_count} 张进入多模态分析"
+        )
 
     return blocks
 
@@ -817,6 +899,7 @@ def build_llm_chain(primary_cfg: Dict[str, Any]) -> List[Tuple[str, str, Dict[st
         ("primary", "主API", primary_cfg),
         ("backup1", "备用API", LLM_BACKUP_CONFIG),
         ("backup2", "备用API2", LLM_BACKUP2_CONFIG),
+        ("backup3", "备用API3", LLM_BACKUP3_CONFIG),
     ]
 
 
@@ -2578,7 +2661,8 @@ def call_llm_api(
         payload["temperature"] = 1.0
         payload["max_tokens"] = MAX_COMPLETION_TOKENS
 
-    resp = session.post(url, json=payload, headers=headers, timeout=300)
+    llm_session = get_llm_http_session(api_config)
+    resp = llm_session.post(url, json=payload, headers=headers, timeout=300)
     try:
         resp.raise_for_status()
     except Exception:

@@ -89,6 +89,7 @@ cp config.yaml.example config.yaml
 - `llm.api_key` / `llm.api_key_env`: Primary model API key or environment variable name
 - `llm_backup.api_key`: First backup model key (optional but strongly recommended)
 - `llm_backup2.api_key` / `llm_backup2.api_key_env`: Second backup model key (optional)
+- `llm_backup3.api_key` / `llm_backup3.api_key_env`: Third backup model key (optional)
 - `imap.email` / `imap.password`: Receiver email and app password
 
 **Full closed loop (receive + analyze + auto-send reports) adds:**
@@ -162,12 +163,13 @@ curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
 
 ### Recommended LLM
 
-The default example now uses `Kimi` as the primary model, with `Kimi + GPT-5.4` as two backup layers:
+The default example now uses `Qwen3-Max` as the primary model, with `domestic Kimi + overseas Kimi + GPT-5.4` as three backup layers:
 
-- **Primary model example**: `kimi-k2.5 + supports_vision: true`
+- **Primary model example**: `qwen3-max + supports_vision: true`
 - **First backup example**: `kimi-k2.5 + supports_vision: true`
-- **Second backup example**: `gpt-5.4 + supports_vision: true + reasoning_effort: medium`
-- **Fallback behavior**: if the primary model has no usable key or fails at runtime, the system automatically tries `llm_backup`, then `llm_backup2`
+- **Second backup example**: `kimi-k2.5 + supports_vision: true`
+- **Third backup example**: `gpt-5.4 + supports_vision: true + reasoning_effort: medium`
+- **Fallback behavior**: if the primary model has no usable key or fails at runtime, the system automatically tries `llm_backup`, then `llm_backup2`, then `llm_backup3`
 
 ## Security Notes
 
@@ -229,8 +231,8 @@ A: By default, the system treats “15 minutes before the US market opens” as 
 - Idempotency: no re-analysis and no duplicate report generation when there are no new pending emails
 - Real attachment tests completed for `.txt`, `.pdf`, and images
 - Real delivery tests completed for both Gmail and Outlook whitelist senders
-- `kimi-k2.5 + supports_vision: true` has now been validated end-to-end for multimodal runs: both image attachments and inline-body images were converted into multimodal inputs and successfully produced/sent a report
-- Multi-level fallback verified: the system can continue from the primary model to `llm_backup` / `llm_backup2` when needed
+- `qwen3-max + supports_vision: true` and `qwen-vl-max + supports_vision: true` have now been validated end-to-end for multimodal runs: both image attachments and inline-body images were converted into multimodal inputs and successfully produced/sent a report
+- Multi-level fallback verified: the system can continue from the primary model to `llm_backup` / `llm_backup2` / `llm_backup3` when needed
 - `early daily` verified: once all expected whitelist senders have arrived, `daily` is sent before the DDL
 - `supplement` verified: after `daily` is sent early, new whitelist mail remains `pending` first and is later sent separately during the supplement window
 
