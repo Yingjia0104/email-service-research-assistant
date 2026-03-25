@@ -3,7 +3,7 @@
 ## 项目概述
 
 这是一个自动化邮件研究系统，可以：
-- 通过 IMAP 收取 Gmail 邮件
+- 通过 IMAP 收取白名单邮件
 - 自动解析邮件附件（.msg, .pdf, .docx 等）
 - 调用通用 LLM（如 Moonshot / OpenAI）分析卖方邮件
 - 生成专业 HF Morning Brief 格式的投资报告
@@ -12,15 +12,16 @@
 
 ## 核心文件
 
-```
-├── main.py              # FastAPI 服务，提供邮件收取/发送 API
-├── qclaw_mail_file.py  # 核心处理脚本：收取→分析→生成报告→发送
-├── email_db.py         # SQLite 去重、pending/processed、发送记录
-├── config.yaml          # 配置文件（API密钥、邮箱配置等）
-├── requirements.txt     # Python 依赖
-├── reference_css.txt   # 报告格式校准用 CSS
+```text
+├── app/                # 统一业务引擎（api / mail / pipeline / render / runtime / storage）
+├── main.py             # 服务入口：FastAPI + 后台轮询 + 自动调度
+├── qclaw_mail_file.py  # CLI 入口：手动触发 / 状态查看
+├── email_db.py         # 根目录兼容层
+├── config.yaml         # 配置文件（API密钥、邮箱配置等）
+├── requirements.txt    # Python 依赖
+├── reference_css.txt   # 报告格式 CSS
 ├── reference_body.txt  # 报告结构参考
-├── tests/test_smoke.py # 关键 smoke test / 回归测试
+├── tests/              # smoke / 回归测试
 └── generate_api_key.py # API 密钥生成工具
 ```
 
@@ -33,15 +34,18 @@
 api_key: "your-secret-key"
 llm:
   api_key: "your-primary-llm-api-key"
-  base_url: "https://api.moonshot.cn/v1"
-  model: "kimi-k2.5"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen3-max"
+  supports_vision: true
 llm_backup:
   api_key: "your-backup-api-key"
-  base_url: "https://api.moonshot.ai/v1"
+  base_url: "https://api.moonshot.cn/v1"
   model: "kimi-k2.5"
+  supports_vision: true
 smtp:
   host: "smtp.gmail.com"
   port: 587
+  use_ssl: false
   timeout_seconds: 30
   email: "your-email@gmail.com"
   password: "your-app-password"
@@ -75,10 +79,10 @@ pip install -r requirements.txt
 ### 3. 启动服务
 
 ```bash
-# 启动 API 服务
+# 服务模式：启动 API + 后台轮询 + 自动调度
 python main.py
 
-# 另一终端：运行处理流程
+# CLI 模式：手动触发完整流程
 python qclaw_mail_file.py
 ```
 
@@ -98,6 +102,10 @@ python qclaw_mail_file.py
 python qclaw_mail_file.py --analyze
 ```
 
+说明：
+- 这个模式只处理 SQLite 里当前已有的 `pending` 邮件
+- 它仍然会生成并发送报告，只是不会先去收件
+
 ### 其他选项
 
 ```bash
@@ -110,6 +118,11 @@ python qclaw_mail_file.py --analyze
 ### 收取邮件
 ```bash
 GET http://localhost:8877/api/emails?api_key=YOUR_KEY&limit=10
+```
+
+### 查看单封邮件
+```bash
+GET http://localhost:8877/api/emails/123?api_key=YOUR_KEY
 ```
 
 ### 发送邮件
@@ -132,21 +145,20 @@ POST http://localhost:8877/api/send?api_key=YOUR_KEY
 - Peripheral Intelligence（外围信息映射）
 - Actionable Ideas（可执行建议）
 
-## 2026-03-16 关键迭代
+## 当前架构
 
-1. 状态流转改为以 `emails.db` 为唯一事实来源，解决了“分析对象”和“标记 processed 对象”可能错位的问题
-2. 服务端鉴权、白名单等配置按请求读取，联调期间修改 `config.yaml` 不必重启 API 才生效
-3. 分析前新增上下文清洗：尾部署名/免责声明裁剪、图片元数据替代 base64、长内容截断
-4. 超长分析改为“两阶段”：先拆成两个子批次，生成结构化 JSON 摘要，再合并生成最终 HTML
-5. 中间摘要显式包含 `fact_subject / opinion_subject / info_type / source_evidence`，用于稳定事实/观点分离与主语归因
-6. `save_report()` 增加本地日期标题统一、伪小标题提升、独立粗体标签与提示框样式规范化
-7. SMTP 发送同时支持 `587 + STARTTLS` 与 `465 + SSL`
-8. 已补 smoke tests 覆盖配置热加载、fallback、上下文清洗、结构化摘要解析、HTML 规范化等关键路径
-9. SMTP 发送新增显式 timeout 与异常分类，便于区分超时 / 认证失败 / 连接失败
-10. 定时分析与补充分析窗口改为按真实 `America/New_York` 时区计算，并自动跳过周末
-11. 后台收信新增“全员到齐即提前触发 daily”的逻辑；若未到齐，则继续等待盘前 15 分钟 DDL
-12. 已完成一轮真实联调：Gmail + Outlook 两个白名单发件人全部到齐后，系统会在 DDL 前直接发送 `daily`
-13. `daily` 提前发送后，后续新增白名单邮件会先保持 `pending`，并在 supplement window 内单独发送 `supplement`
+1. `main.py` 是服务入口
+2. `qclaw_mail_file.py` 是 CLI 入口
+3. `app/` 是统一业务引擎 owner
+4. SQLite 是状态主存储，`emails.db` 保存邮件、发送记录、图片链路和运行时状态
+
+## 当前能力
+
+1. 自动模式支持单实例轮询、session-aware `daily / supplement` 调度
+2. 分析前会清理签名、免责声明、内联图片/base64 噪音，并在超长输入时拆批合并
+3. 图片链路支持预筛、轻分类、深分析、视觉上下文回填
+4. SMTP 发送支持 `587 + STARTTLS` 与 `465 + SSL`
+5. 默认模型链示例为 `Qwen3-Max -> 国内 Kimi-2.5 -> 海外 Kimi-2.5 -> GPT-5.4`
 
 ## 注意事项
 
@@ -154,7 +166,7 @@ POST http://localhost:8877/api/send?api_key=YOUR_KEY
 2. **LLM API**：不同提供方额度和限速策略不同，注意监控调用频率
 3. **过滤器**：`config.yaml` 中的 `allowed_senders` 可限制处理特定发件人
 4. **时区**：系统使用北京时间 (Asia/Shanghai)
-5. **定时逻辑**：当前已完成一轮 early daily / supplement 联调，但美股节假日休市日历等边界仍值得继续优化
+5. **日志落盘**：运行日志默认打印到 stdout；如果需要写入 `main_runtime.log`，请用 `python main.py 2>&1 | tee -a main_runtime.log`
 
 ## 常见问题
 
@@ -162,7 +174,7 @@ POST http://localhost:8877/api/send?api_key=YOUR_KEY
 A: 确保安装了 `extract-msg` 库，用于解析 .msg 文件
 
 **Q: LLM API 超时？**
-A: 检查网络连接，或调整 `qclaw_mail_file.py` 中的超时设置
+A: 检查网络连接，或调整 `config.yaml` 里的模型 / SMTP 超时相关配置
 
 **Q: 如何生成新的 API 密钥？**
 A: 运行 `python generate_api_key.py`

@@ -11,6 +11,45 @@ llm:
   model: "qwen3-max"
   supports_vision: true
 
+# 图片深分析强模型（默认继承 llm 的 key）
+visual_llm:
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen3-vl-235b-a22b-thinking"
+  supports_vision: true
+
+# 图片深分析备用模型
+visual_llm_backup:
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-max-latest"
+  supports_vision: true
+
+visual_llm_backup2:
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-plus-latest"
+  supports_vision: true
+
+# 图片轻分类固定快模型
+visual_llm_fast:
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-max-latest"
+  supports_vision: true
+
+visual_llm_fast_backup:
+  api_key: ""
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  model: "qwen-vl-plus-latest"
+  supports_vision: true
+
+multimodal:
+  max_images: 50
+  max_deep_analysis_images: 15  # 设为 0 表示不限制深分析图片数量
+  classification_concurrency: 2
+  deep_analysis_concurrency: 2
+
 # 第一备用模型配置（默认示例：国内 Kimi）
 llm_backup:
   api_key: "your-backup-api-key"

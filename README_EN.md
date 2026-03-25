@@ -24,8 +24,8 @@ System Traits:
 - 🧠 **Persona-Based Research Output**: Supports configurable research personas for different end users and briefing styles
 - ⏰ **Automatic Scheduling**: `main.py` can poll the inbox on a fixed interval and trigger `daily / supplement` automatically in the pre-market window
 - 🪟 **Session-Aware Early Run**: Supports early triggering after whitelisted sales emails in the current briefing session have fully arrived
-- 🧾 **Real-Time Runtime Logs**: inbox polling, trigger decisions, and `qclaw_mail_file.py` child-process output are streamed into `main_runtime.log`
-- 🔒 **Single-Instance Analysis Protection**: Automatic mode prevents duplicate analysis subprocesses from running at the same time
+- 🧾 **Real-Time Runtime Logs**: inbox polling, trigger decisions, and in-process service analysis logs go to stdout by default; redirect them to `main_runtime.log` when needed
+- 🔒 **Single-Instance Analysis Protection**: Automatic mode prevents duplicate analysis jobs from running at the same time
 - 🏷️ **Institution-First Source Labels**: The report header prefers institution labels recognized from the content itself (for example `MS + JPM + BofA`) rather than just the forwarding mailbox
 
 ## Report Content
@@ -46,7 +46,7 @@ For investment users:
 
 - Target investment banks/analysts list: Supports suffix matching (`@morganstanley.com`) or exact matching (`analyst@gs.com`)
 - Sector/company focus: reserved for future global-priority configuration
-- Persona guidance: see [HF_Morning_Brief_role_guidance候选.md](./HF_Morning_Brief_role_guidance候选.md)
+- Persona guidance: see [hf_morning_brief_role_guidance候选.md](./docs/hf_morning_brief_role_guidance候选.md)
 
 For product / system setup:
 
@@ -54,19 +54,27 @@ For product / system setup:
 
 ## Project Structure
 
-```
-email-service/
-├── main.py                      # FastAPI service entry
-├── qclaw_mail_file.py          # Core processing logic
-├── email_db.py                 # SQLite state and send history
-├── config.yaml.example          # Config file template
-├── requirements.txt             # Python dependencies
+```text
+email-service-research-assistant/
+├── app/
+│   ├── api/                    # FastAPI routes and HTTP adapters
+│   ├── llm/                    # LLM client / prompts / JSON parsing
+│   ├── mail/                   # IMAP / SMTP / mail integration
+│   ├── pipeline/               # preprocessing, report, multimodal, scheduling
+│   ├── render/                 # HTML rendering and formatting
+│   ├── runtime/                # service runtime, analysis entry, CLI support, state/locks
+│   └── storage/                # SQLite storage implementation
+├── main.py                     # service entry
+├── qclaw_mail_file.py          # CLI entry
+├── email_db.py                 # root-level compatibility layer
+├── docs/                       # design and internal docs
+├── tests/                      # smoke + regression tests
+├── config.yaml.example         # config template
+├── requirements.txt            # Python dependencies
+├── reference_css.txt           # report styles
+├── reference_body.txt          # report structure reference
 ├── generate_api_key.py         # API key generator
-├── reference_css.txt           # Report CSS styles
-├── reference_body.txt          # Report structure reference
-├── HF_Morning_Brief_role_guidance候选.md # Persona / role guidance candidates
-├── tests/test_smoke.py         # Smoke / regression tests
-├── CLAUDE.md                   # AI assistant guide
+├── CLAUDE.md                   # collaboration notes
 └── .gitignore                  # Git ignore config
 ```
 
@@ -121,10 +129,10 @@ cp config.yaml.example config.yaml
 ### Running
 
 ```bash
-# 1. Start API service (run in background)
+# Service mode: start API + background polling + automatic scheduling
 python main.py
 
-# 2. Run processing pipeline
+# CLI mode: manually trigger the full processing flow
 python qclaw_mail_file.py
 ```
 
@@ -137,6 +145,7 @@ python qclaw_mail_file.py
 python main.py
 
 # Watch automatic-mode logs in real time
+# if you redirected stdout into a file
 tail -f main_runtime.log
 ```
 
@@ -152,7 +161,8 @@ In automatic mode:
 # Full pipeline
 python qclaw_mail_file.py
 
-# Analyze only (no sending)
+# Process only the pending emails already stored in SQLite
+# Note: this mode still generates and sends the report; it just skips inbox fetching first
 python qclaw_mail_file.py --analyze
 
 # Force run (skip daily limit)
@@ -168,10 +178,18 @@ python qclaw_mail_file.py --check
 # Fetch emails
 curl "http://localhost:8877/api/emails?api_key=YOUR_KEY&limit=10"
 
-# Send email
+# Fetch one email by id
+curl "http://localhost:8877/api/emails/123?api_key=YOUR_KEY"
+
+# Send email with default SMTP config
 curl -X POST "http://localhost:8877/api/send?api_key=YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{"to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
+
+# Send email with custom SMTP config
+curl -X POST "http://localhost:8877/api/send/custom?api_key=YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"smtp_host": "smtp.gmail.com", "smtp_port": 587, "from_email": "src@example.com", "password": "app-password", "to_email": "dest@example.com", "subject": "Test", "body": "Hello", "body_type": "plain"}'
 ```
 
 ## Tech Stack
@@ -212,7 +230,7 @@ The current default chain is:
 
 ### 3. Email Data
 - Email content is stored locally only
-- Core state lives in `emails.db`; `pending_emails.json` remains only for backward compatibility
+- Core state lives in `emails.db`
 - Consider using VM or isolated environment for sensitive emails
 
 ### 4. Third-Party Services
@@ -238,57 +256,44 @@ A: Because the raw HTML still comes from an LLM. The project now includes HTML n
 A: By default, the system treats “15 minutes before the US market opens” as the `daily` send/receive DDL. During the current briefing session, if all whitelisted sales have already arrived and the recent quiet period has been satisfied, it can send `daily` before that point; if they have not all arrived by the DDL, it stops waiting and sends anyway. After `daily` has been sent, any new whitelist email received within 1 hour after the market opens is handled through `supplement`, which retries analysis and sends a separate supplemental brief.
 
 **Q: How do I watch automatic-mode logs?**
-A: After running `python main.py`, inbox polling, whitelist matches, `early run / DDL / supplement` decisions, and `qclaw_mail_file.py` child-process output are all written into `main_runtime.log`. The easiest way to watch it is:
+A: By default, running `python main.py` prints these logs to stdout. If you want them persisted to a file as well, start it like this:
 
 ```bash
-tail -f main_runtime.log
+python main.py 2>&1 | tee -a main_runtime.log
 ```
 
 **Q: What does `Source` mean in the report header?**
 A: `Source` tries to show the institution labels recognized from the actual content in this run (for example `MS + JPM + BofA`), not just the mailbox that forwarded or triggered the run. It only falls back to a generic source label when no institution can be confidently recognized.
 
-## Latest Progress
+## Current Architecture
 
-### Optimizations Completed on 0318
+- `main.py`: service entry for FastAPI, background polling, and automatic scheduling
+- `qclaw_mail_file.py`: CLI entry for manual triggering and status inspection
+- `app/`: unified business engine for mail, pipeline, render, storage, and runtime
 
-- Request-time config reload now applies to auth and sender allowlists, so `allowed_senders` can be hot-updated during testing
-- Email ingestion, pending state, and sent-report history now live in SQLite to avoid analysis/marking mismatches
-- The database layer now uses scoped uniqueness and atomic success finalization to reduce dedupe races and “sent but still pending” state splits
-- Prompt construction now removes signatures/disclaimers, strips inline image payloads/base64 blobs, and caps single-email / batch context length
-- If context is still too large, the system first generates structured JSON summaries per sub-batch and then merges them into the final brief
-- Intermediate summaries now carry `fact_subject / opinion_subject / info_type / source_evidence` to preserve attribution and separate facts from quoted opinions
-- SMTP supports both `587 + STARTTLS` and `465 + SSL`, with explicit timeout and clearer error classification
-- The default chain is now `Qwen3-Max -> Domestic Kimi-2.5 -> Overseas Kimi-2.5 -> GPT-5.4`
-- Automatic mode now supports single-instance polling, real-time runtime logs, and child-process streaming into `main_runtime.log`
-- Early `daily` triggering now uses a session-aware policy tied to the most recent US market close, whitelist-sales coverage, and quiet-period checks
-- Email ingestion no longer relies on a coarse natural-day window and instead uses `received_after_local + whitelist` for more stable candidate selection
-- Report-header `Source` now prefers institution labels inferred from the actual content rather than personal sender names or forwarding mailboxes
-- Market trigger time and supplement window now use real `America/New_York` timezone handling and skip weekends
-- `early daily` is now session-aware: all whitelisted sales in the current session must have arrived, enough session mail must exist, and the quiet period must be satisfied; otherwise the system waits for the pre-market DDL
+## Current Capabilities
 
-### Flows Verified Today
+- Email ingestion, pending state, and sent-report history are unified in SQLite
+- Automatic mode supports single-instance execution and session-aware `daily / supplement` scheduling
+- Prompt construction trims signatures, disclaimers, inline image noise, and split-merges oversized inputs
+- The multimodal pipeline supports image prescreening, lightweight classification, deep analysis, cached visual context, and summary-stage wiring
+- SMTP supports both `587 + STARTTLS` and `465 + SSL`
+- The default example chain is `Qwen3-Max -> Domestic Kimi-2.5 -> Overseas Kimi-2.5 -> GPT-5.4`
 
-- Whitelist-positive flow: receive, analyze, generate report, and auto-send
-- Non-whitelisted mail reaches the inbox but is correctly ignored by the system
-- Idempotency: no re-analysis and no duplicate report generation when there are no new pending emails
-- Real attachment tests completed for `.txt`, `.pdf`, and images
-- Real delivery tests completed for both Gmail and Outlook whitelist senders
-- `qwen3-max + supports_vision: true` and `qwen-vl-max + supports_vision: true` have now been validated end-to-end for multimodal runs: both image attachments and inline-body images were converted into multimodal inputs and successfully produced/sent a report
-- Multi-level fallback verified: the system can continue from the primary model to `llm_backup` / `llm_backup2` / `llm_backup3` when needed
-- `early daily` verified: once all expected whitelist senders have arrived, `daily` is sent before the DDL
-- `supplement` verified: after `daily` is sent early, new whitelist mail remains `pending` first and is later sent separately during the supplement window
-- Automatic-mode logs now include timestamps, receive-start cutoff, whitelist/session state, trigger reasons, and child-process output, which makes both demos and troubleshooting much easier
+## Current Validation Status
 
-### Future Optimization Items
+- The full test suite passes
+- The whitelist-positive flow has been validated: receive, analyze, generate, and send
+- Non-whitelisted mail is ignored correctly
+- Idempotency is validated: no duplicate analysis/report when there is no new pending mail
+- `.txt`, `.pdf`, and image attachment flows are covered
+- Multi-level fallback has been validated across `llm_backup` / `llm_backup2` / `llm_backup3`
+
+## Future Optimization Items
 
 - Add a US market holiday calendar
 - Validate and optimize large-batch / long-attachment pressure scenarios
-- In split-batch runs, images are interpreted multimodally only at the sub-batch stage; some image insight can be compressed away during the final merge, so a more explicit `image_insights / image_evidence` carry-over is a good next improvement
-
-### Report Formatting Notes
-
-- HTML formatting stability is mainly handled by `save_report()` post-processing, which already normalizes local-date titles, pseudo-headings, and action-box / label styles
-- This is presentation-layer work rather than core business logic; if you want the brief to look even closer to a fixed template, the HTML normalization rules can be extended further
+- Improve asynchronous multimodal processing
 
 ## License
 

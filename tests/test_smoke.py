@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import json
 import os
 import sqlite3
 import smtplib
 import socket
+import struct
 import tempfile
 import unittest
 from datetime import datetime
@@ -22,7 +24,18 @@ def tearDownModule():
     asyncio.set_event_loop(None)
 
 
-class SmokeTests(unittest.TestCase):
+class SmokeTestHelpers:
+    @staticmethod
+    def make_png_data_url(width=200, height=200):
+        raw = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + struct.pack(">II", width, height)
+            + b"\x08\x02\x00\x00\x00"
+            + b"\x00\x00\x00\x00"
+        )
+        return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
     def assertContainsAll(self, text, snippets):
         for snippet in snippets:
             self.assertIn(snippet, text)
@@ -39,6 +52,29 @@ class SmokeTests(unittest.TestCase):
             ],
         )
 
+    def assertBatchPromptDiscipline(self, module, system_prompt):
+        self.assertContainsAll(
+            system_prompt,
+            [
+                module.get_batch_prompt_shared_brief(),
+            ],
+        )
+
+    def assertMergePromptDiscipline(self, module, system_prompt, total_email_count):
+        del total_email_count
+        self.assertContainsAll(
+            system_prompt,
+            [
+                module.get_merge_prompt_shared_brief(),
+            ],
+        )
+
+
+class LegacySmokeMixin(SmokeTestHelpers):
+    """兼容拆分后的 tests/test_*.py 包装文件。"""
+
+
+class SmokeTests(LegacySmokeMixin, unittest.TestCase):
     def test_config_example_has_no_real_key(self):
         repo_root = os.path.dirname(os.path.dirname(__file__))
         cfg_path = os.path.join(repo_root, "config.yaml.example")
@@ -46,12 +82,73 @@ class SmokeTests(unittest.TestCase):
             text = f.read()
         self.assertNotIn("sk-", text)
         self.assertIn('model: "qwen3-max"', text)
+        self.assertIn('model: "qwen3-vl-235b-a22b-thinking"', text)
+        self.assertIn('model: "qwen-vl-max-latest"', text)
+        self.assertIn('model: "qwen-vl-plus-latest"', text)
         self.assertIn('model: "gpt-5.4"', text)
         self.assertIn('base_url: "https://api.moonshot.ai/v1"', text)
         self.assertIn('api_key_env: "OPENAI_API_KEY"', text)
         self.assertIn("supports_vision: true", text)
+        self.assertIn("classification_concurrency: 2", text)
+        self.assertIn("deep_analysis_concurrency: 2", text)
 
-    def test_send_report_uses_query_api_key(self):
+    def test_load_config_reads_multimodal_concurrency(self):
+        import qclaw_mail_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = os.path.join(td, "config.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "multimodal:\n"
+                    "  classification_concurrency: 2\n"
+                    "  deep_analysis_concurrency: 2\n"
+                )
+
+            with patch.object(qclaw_mail_file, "CONFIG_FILE", cfg_path):
+                qclaw_mail_file.load_config()
+
+        self.assertEqual(qclaw_mail_file.LIGHTWEIGHT_CLASSIFICATION_CONCURRENCY, 2)
+        self.assertEqual(qclaw_mail_file.DEEP_ANALYSIS_CONCURRENCY, 2)
+
+    def test_load_config_allows_uncapped_deep_analysis_images(self):
+        import qclaw_mail_file
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = os.path.join(td, "config.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "multimodal:\n"
+                    "  max_deep_analysis_images: 0\n"
+                )
+
+            with patch.object(qclaw_mail_file, "CONFIG_FILE", cfg_path):
+                qclaw_mail_file.load_config()
+
+        self.assertIsNone(qclaw_mail_file.MAX_DEEP_ANALYSIS_IMAGES)
+
+    def test_load_visual_model_defaults_inherit_primary_key(self):
+        import qclaw_mail_file
+
+        fake_cfg = {
+            "llm": {
+                "api_key": "shared-key",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "model": "qwen3-max",
+                "supports_vision": True,
+            }
+        }
+
+        with patch.object(qclaw_mail_file, "load_config", return_value=fake_cfg):
+            qclaw_mail_file.load_llm_config()
+            visual_fast = qclaw_mail_file.load_visual_fast_llm_config()
+            visual_deep = qclaw_mail_file.load_visual_llm_config()
+
+        self.assertEqual(visual_fast["api_key"], "shared-key")
+        self.assertEqual(visual_fast["model"], "qwen-vl-max-latest")
+        self.assertEqual(visual_deep["api_key"], "shared-key")
+        self.assertEqual(visual_deep["model"], "qwen3-vl-235b-a22b-thinking")
+
+    def test_send_report_uses_direct_mail_service(self):
         import qclaw_mail_file
 
         with tempfile.TemporaryDirectory() as td:
@@ -59,11 +156,8 @@ class SmokeTests(unittest.TestCase):
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("<html><head></head><body>ok</body></html>")
 
-            fake_resp = Mock()
-            fake_resp.json.return_value = {"success": True}
-
-            with patch.object(qclaw_mail_file, "load_config", return_value={"api_key": "k", "target": {"email": "t@e.com"}}):
-                with patch.object(qclaw_mail_file.session, "post", return_value=fake_resp) as post:
+            with patch.object(qclaw_mail_file, "load_config", return_value={"target": {"email": "t@e.com"}, "smtp": {"email": "from@example.com", "password": "p"}}):
+                with patch.object(qclaw_mail_file.app_mail_service, "send_email", return_value={"success": True, "message": "邮件发送成功"}) as send_email:
                     with patch.object(qclaw_mail_file.email_db, "finalize_report_success", return_value=2) as finalize:
                         ok = qclaw_mail_file.send_report(
                             report_path,
@@ -73,11 +167,334 @@ class SmokeTests(unittest.TestCase):
                         )
 
             self.assertTrue(ok)
-            post.assert_called_once()
+            send_email.assert_called_once()
             finalize.assert_called_once()
-            _, kwargs = post.call_args
-            self.assertEqual(kwargs.get("params"), {"api_key": "k"})
-            self.assertNotIn("api_key", kwargs.get("json", {}))
+            _, kwargs = send_email.call_args
+            self.assertTrue(callable(kwargs["load_config_fn"]))
+            self.assertEqual(kwargs["to_email"], "t@e.com")
+            self.assertEqual(kwargs["body_type"], "html")
+
+    def test_lightweight_image_classification_uses_fast_model(self):
+        import qclaw_mail_file
+
+        captured = []
+
+        def fake_call(chain, system_prompt, user_prompt, label, user_content_blocks=None):
+            captured.append({
+                "model": chain[0][2]["model"],
+                "label": label,
+                "blocks": user_content_blocks,
+            })
+            image_key = user_content_blocks[0]["text"].splitlines()[0].split(": ", 1)[1]
+            return json.dumps({
+                "images": [
+                    {
+                        "image_key": image_key,
+                        "image_type": "social_signal_visual",
+                        "role_in_email": "market_signal",
+                    }
+                ]
+            }, ensure_ascii=False)
+
+        with patch.object(qclaw_mail_file, "_call_llm_with_config_chain", side_effect=fake_call):
+            with patch.object(
+                qclaw_mail_file,
+                "load_visual_fast_llm_config",
+                return_value={"api_key": "k", "model": "qwen-vl-max-latest", "supports_vision": True, "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+            ):
+                result = qclaw_mail_file._classify_multimodal_images_lightweight(
+                    [
+                        {
+                            "image_key": "attachment:1:1",
+                            "subject": "demo",
+                            "filename": "tweet.png",
+                            "source_kind": "attachment",
+                            "size": 123,
+                            "data_url": self.make_png_data_url(900, 600),
+                        }
+                    ],
+                    classification_concurrency=2,
+                )
+
+        self.assertEqual(result["attachment:1:1"]["image_type"], "social_signal_visual")
+        self.assertEqual(captured[0]["model"], "qwen-vl-max-latest")
+        self.assertTrue(captured[0]["label"].startswith("图片轻分类-批次"))
+
+    def test_lightweight_image_classification_upgrades_market_chart_with_direct_signal(self):
+        import qclaw_mail_file
+
+        def fake_call(chain, system_prompt, user_prompt, label, user_content_blocks=None):
+            image_key = user_content_blocks[0]["text"].splitlines()[0].split(": ", 1)[1]
+            return json.dumps({
+                "images": [
+                    {
+                        "image_key": image_key,
+                        "image_type": "market_data_chart",
+                        "direct_market_signal": True,
+                    }
+                ]
+            }, ensure_ascii=False)
+
+        with patch.object(qclaw_mail_file, "_call_llm_with_config_chain", side_effect=fake_call):
+            with patch.object(
+                qclaw_mail_file,
+                "load_visual_fast_llm_config",
+                return_value={"api_key": "k", "model": "qwen-vl-max-latest", "supports_vision": True, "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+            ):
+                result = qclaw_mail_file._classify_multimodal_images_lightweight(
+                    [
+                        {
+                            "image_key": "attachment:1:1",
+                            "subject": "demo",
+                            "filename": "chart.png",
+                            "source_kind": "attachment",
+                            "size": 123,
+                            "data_url": self.make_png_data_url(900, 600),
+                        }
+                    ],
+                    classification_concurrency=2,
+                )
+
+        self.assertEqual(result["attachment:1:1"]["image_type"], "market_data_chart")
+        self.assertEqual(result["attachment:1:1"]["role_in_email"], "market_signal")
+
+    def test_deep_image_analysis_prioritizes_social_signal_with_strong_model(self):
+        import qclaw_mail_file
+
+        captured = []
+
+        def fake_call(chain, system_prompt, user_prompt, label, user_content_blocks=None):
+            captured.append({
+                "model": chain[0][2]["model"],
+                "label": label,
+            })
+            return json.dumps({
+                "core_signal": "signal ok",
+                "supporting_details": ["detail ok"],
+            }, ensure_ascii=False)
+
+        with patch.object(qclaw_mail_file, "_call_llm_with_config_chain", side_effect=fake_call):
+            with patch.object(
+                qclaw_mail_file,
+                "load_visual_llm_config",
+                return_value={"api_key": "k", "model": "qwen3-vl-235b-a22b-thinking", "supports_vision": True, "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+            ):
+                result = qclaw_mail_file._deep_analyze_multimodal_images(
+                    [
+                        {
+                            "image_key": "attachment:1:1",
+                            "subject": "chart",
+                            "filename": "chart.png",
+                            "image_type": "market_data_chart",
+                            "role_in_email": "supporting_evidence",
+                            "size": 100,
+                            "data_url": self.make_png_data_url(900, 600),
+                        },
+                        {
+                            "image_key": "attachment:1:2",
+                            "subject": "signal",
+                            "filename": "signal.png",
+                            "image_type": "social_signal_visual",
+                            "role_in_email": "market_signal",
+                            "size": 100,
+                            "data_url": self.make_png_data_url(901, 600),
+                        },
+                    ],
+                    max_deep_analysis_images=1,
+                    deep_analysis_concurrency=2,
+                )
+
+        self.assertEqual(set(result.keys()), {"attachment:1:2"})
+        self.assertEqual(captured[0]["model"], "qwen3-vl-235b-a22b-thinking")
+        self.assertIn("图片深分析-social_signal_visual-attachment:1:2", captured[0]["label"])
+
+    def test_prepare_emails_for_analysis_appends_visual_context(self):
+        import qclaw_mail_file
+
+        with patch.object(
+            qclaw_mail_file,
+            "build_email_visual_context_map_for_analysis",
+            return_value={
+                1: {
+                    "rendered_text": "[邮件级视觉上下文]\n[Visual Context] 社交传播加速",
+                }
+            },
+        ):
+            prepared = qclaw_mail_file.prepare_emails_for_analysis([
+                {
+                    "subject": "demo",
+                    "body": "<p>正文内容</p>",
+                }
+            ])
+
+        self.assertTrue(prepared[0]["_analysis_visual_context_applied"])
+        self.assertIn("[邮件级视觉上下文]", prepared[0]["_analysis_body"])
+        self.assertIn("社交传播加速", prepared[0]["_analysis_body"])
+
+    def test_prepare_emails_for_analysis_inserts_visual_context_at_image_positions(self):
+        import qclaw_mail_file
+
+        body = (
+            "<p>前文</p>"
+            "<img src='data:image/png;base64,AAAAAA'>"
+            "<p>中段</p>"
+            "<img src='cid:image002.png@abc'>"
+            "<p>尾段</p>"
+        )
+        with patch.object(
+            qclaw_mail_file,
+            "build_email_visual_context_map_for_analysis",
+            return_value={
+                1: {
+                    "visual_status": "ready",
+                    "inline_visual_context_records": [
+                        {
+                            "image_key": "inline:1:1",
+                            "kind": "inline",
+                            "inline_index": 1,
+                            "filename": "inline_image_1.png",
+                            "core_signal": "第一张图是传播信号。",
+                        }
+                    ],
+                    "supporting_visual_evidence_records": [
+                        {
+                            "image_key": "attachment:1:2",
+                            "kind": "attachment",
+                            "filename": "image002.png",
+                            "core_signal": "第二张图是图表证据。",
+                        }
+                    ],
+                }
+            },
+        ):
+            prepared = qclaw_mail_file.prepare_emails_for_analysis([
+                {
+                    "subject": "demo",
+                    "body": body,
+                }
+            ])
+
+        analysis_body = prepared[0]["_analysis_body"]
+        self.assertIn("前文", analysis_body)
+        self.assertIn("第一张图是传播信号。", analysis_body)
+        self.assertIn("第二张图是图表证据。", analysis_body)
+        self.assertNotIn("[Visual Context]", analysis_body)
+        self.assertNotIn("[Visual Evidence]", analysis_body)
+        self.assertLess(analysis_body.index("前文"), analysis_body.index("第一张图是传播信号"))
+        self.assertLess(analysis_body.index("中段"), analysis_body.index("第二张图是图表证据"))
+        self.assertLess(analysis_body.index("第二张图是图表证据"), analysis_body.index("尾段"))
+
+    def test_normalize_email_image_keys_collapses_legacy_runtime_index_variants(self):
+        from app.storage import email_db as app_storage_email_db
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "emails.db")
+            original_db_file = app_storage_email_db.DB_FILE
+            try:
+                app_storage_email_db.DB_FILE = db_path
+                app_storage_email_db.init_db()
+
+                conn = app_storage_email_db._connect()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO email_images (
+                        email_local_id, image_key, kind, source_location, inline_index, filename,
+                        content_type, size, sha256, prescreen_status, prescreen_reasons,
+                        image_type, role_in_email, analysis_status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        2285,
+                        "attachment:1:15",
+                        "attachment",
+                        "attachment",
+                        None,
+                        "image015.png",
+                        "image/png",
+                        123,
+                        "sha",
+                        "candidate",
+                        json.dumps([], ensure_ascii=False),
+                        "market_data_chart",
+                        "market_signal",
+                        "analyzed",
+                        "2026-03-25T00:00:00+08:00",
+                        "2026-03-25T00:00:00+08:00",
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO email_images (
+                        email_local_id, image_key, kind, source_location, inline_index, filename,
+                        content_type, size, sha256, prescreen_status, prescreen_reasons,
+                        image_type, role_in_email, analysis_status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        2285,
+                        "attachment:2:15",
+                        "attachment",
+                        "attachment",
+                        None,
+                        "image015.png",
+                        "image/png",
+                        123,
+                        "sha",
+                        "candidate",
+                        json.dumps([], ensure_ascii=False),
+                        "",
+                        "",
+                        "classified",
+                        "2026-03-25T00:01:00+08:00",
+                        "2026-03-25T00:01:00+08:00",
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO image_analysis_results (
+                        email_local_id, image_key, core_signal, supporting_details, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        2285,
+                        "attachment:2:15",
+                        "图中显示A股主要指数近期走势分化。",
+                        json.dumps(["detail"], ensure_ascii=False),
+                        "2026-03-25T00:01:00+08:00",
+                        "2026-03-25T00:01:00+08:00",
+                    ),
+                )
+                conn.commit()
+                conn.close()
+
+                changed = app_storage_email_db.normalize_email_image_keys(2285)
+                records = app_storage_email_db.get_email_image_analysis_records(2285)
+
+                self.assertGreaterEqual(changed, 1)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["image_key"], "attachment:15")
+                self.assertEqual(records[0]["filename"], "image015.png")
+                self.assertEqual(records[0]["core_signal"], "图中显示A股主要指数近期走势分化。")
+
+                conn = app_storage_email_db._connect()
+                try:
+                    keys = [
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT image_key FROM email_images WHERE email_local_id = ? ORDER BY image_key",
+                            (2285,),
+                        ).fetchall()
+                    ]
+                finally:
+                    conn.close()
+
+                self.assertEqual(keys, ["attachment:15"])
+            finally:
+                app_storage_email_db.DB_FILE = original_db_file
 
     def test_mark_processed_marks_only_given_uids(self):
         import qclaw_mail_file
@@ -348,12 +765,13 @@ class SmokeTests(unittest.TestCase):
         async def run_case():
             with patch.object(main, "has_daily_report_sent_today", return_value=False):
                 with patch.object(main, "runtime_print") as rp:
-                    with patch.object(main, "get_analysis_task_lock", return_value=asyncio.Lock()):
+                    with patch.object(main, "try_acquire_analysis_lock") as acquire_lock:
                         with patch.object(main.email_db, "get_pending_emails") as get_pending:
                             await main.trigger_supplement_analysis(1)
-            return rp, get_pending
+            return rp, get_pending, acquire_lock
 
-        rp, get_pending = asyncio.run(run_case())
+        rp, get_pending, acquire_lock = asyncio.run(run_case())
+        acquire_lock.assert_not_called()
         get_pending.assert_not_called()
         rp.assert_any_call("   ⏭️ 今日尚未发送 daily 报告，跳过 supplement")
 
@@ -385,6 +803,117 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("[附件内容已截断]", cleaned)
         self.assertLessEqual(len(cleaned), main.MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS + 20)
 
+    def test_scheduler_fetch_and_save_emails_uses_mail_service_callback(self):
+        from app.pipeline import scheduler
+
+        runtime_logs = []
+        fake_db = Mock()
+        fake_db.get_status.side_effect = [
+            {"total": 10, "pending": 2, "processed": 8},
+            {"total": 12, "pending": 4, "processed": 8},
+        ]
+        fetch_emails_and_persist = Mock(return_value=[{"id": "100"}, {"id": "101"}])
+
+        async def run_case():
+            await scheduler.fetch_and_save_emails(
+                load_config_fn=lambda: {
+                    "background": {"enabled": True, "limit": 20},
+                    "filters": {"allowed_senders": ["analyst@example.com"]},
+                },
+                email_db_module=fake_db,
+                runtime_print_fn=runtime_logs.append,
+                has_daily_report_sent_today_fn=lambda: True,
+                should_trigger_early_daily_fn=lambda *_args, **_kwargs: (False, "skip"),
+                trigger_daily_analysis_fn=Mock(),
+                is_in_supplement_window_fn=lambda: False,
+                trigger_supplement_analysis_fn=Mock(),
+                fetch_emails_and_persist_fn=fetch_emails_and_persist,
+            )
+
+        asyncio.run(run_case())
+
+        fetch_emails_and_persist.assert_called_once_with(20)
+        self.assertIn("📬 [后台] 正在收取邮件...", runtime_logs)
+        self.assertIn("✅ [后台] 本轮抓取 2 封，新增入库 2 封", runtime_logs)
+
+    def test_service_runtime_runs_app_service_analysis_entry(self):
+        from app.runtime import service_runtime
+
+        runtime_logs = []
+
+        async def run_case():
+            with patch.object(service_runtime.app_service_analysis, "run_analysis_job", return_value=0) as run_job:
+                exit_code = await service_runtime.run_analysis_job_in_process(
+                    supplement_mode=True,
+                    label="supplement",
+                    runtime_print_fn=runtime_logs.append,
+                    timeout=5,
+                )
+
+            self.assertEqual(exit_code, 0)
+            run_job.assert_called_once_with(supplement_mode=True)
+
+        asyncio.run(run_case())
+
+        self.assertTrue(any("启动进程内分析任务" in line for line in runtime_logs))
+        self.assertTrue(any("进程内分析任务结束" in line for line in runtime_logs))
+
+    def test_multimodal_pipeline_uses_batch_storage_hooks(self):
+        from app.pipeline import multimodal_pipeline
+
+        emails = [
+            {"local_id": 101, "subject": "a", "body": "<p>a</p>"},
+            {"local_id": 102, "subject": "b", "body": "<p>b</p>"},
+        ]
+        batch_context_loader = Mock(return_value={})
+        batch_record_loader = Mock(return_value={101: [], 102: []})
+        batch_upsert_images = Mock()
+        batch_update_classifications = Mock()
+        batch_upsert_analysis = Mock()
+        batch_save_contexts = Mock()
+
+        result = multimodal_pipeline.build_email_visual_context_map_for_analysis(
+            emails,
+            api_config={},
+            classification_api_config={},
+            deep_analysis_api_config={},
+            model_supports_vision_fn=lambda *_args, **_kwargs: True,
+            collect_multimodal_images_fn=lambda *args, **kwargs: {},
+            build_image_objects_fn=lambda *args, **kwargs: [],
+            build_email_visual_context_map_fn=lambda *args, **kwargs: {},
+            render_email_visual_context_text_fn=lambda context: f"status={context.get('visual_status', '')}",
+            classify_images_fn=lambda *args, **kwargs: {},
+            deep_analyze_images_fn=lambda *args, **kwargs: {},
+            get_email_visual_context_fn=Mock(),
+            get_email_visual_contexts_fn=batch_context_loader,
+            get_email_image_analysis_records_fn=Mock(),
+            get_email_image_analysis_records_map_fn=batch_record_loader,
+            upsert_email_images_fn=Mock(),
+            upsert_email_images_batch_fn=batch_upsert_images,
+            update_image_classifications_fn=Mock(),
+            update_image_classifications_batch_fn=batch_update_classifications,
+            upsert_image_analysis_results_fn=Mock(),
+            upsert_image_analysis_results_batch_fn=batch_upsert_analysis,
+            save_email_visual_context_fn=Mock(),
+            save_email_visual_contexts_batch_fn=batch_save_contexts,
+            max_multimodal_images=8,
+            max_deep_analysis_images=4,
+            classification_concurrency=2,
+            deep_analysis_concurrency=2,
+            max_inline_visual_contexts=None,
+            max_supporting_visual_evidence=None,
+            logger=Mock(),
+        )
+
+        self.assertEqual(result[1]["visual_status"], "empty")
+        self.assertEqual(result[2]["visual_status"], "empty")
+        batch_context_loader.assert_called_once_with([101, 102])
+        batch_record_loader.assert_called_once_with([101, 102])
+        batch_upsert_images.assert_called_once_with({})
+        batch_update_classifications.assert_not_called()
+        batch_upsert_analysis.assert_not_called()
+        batch_save_contexts.assert_called_once()
+
     def test_verify_api_key_uses_fresh_config(self):
         import main
 
@@ -406,6 +935,21 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("核心观点一", cleaned)
         self.assertNotIn("Best regards", cleaned)
         self.assertNotIn("Confidentiality Notice", cleaned)
+
+    def test_sanitize_email_body_strips_leading_header_and_trailing_disclaimer(self):
+        import qclaw_mail_file
+
+        body = (
+            "SALES COMMENTARY -- Not a product of MS Research and should not be regarded as a research report |\n"
+            "FOR INSTITUTIONAL DISTRIBUTION ONLY\n\n"
+            "<p>正文内容</p>\n"
+            "If you have received this communication in error, please notify the sender immediately.\n"
+            "This email and any files attached may be sensitive and confidential.\n"
+        )
+
+        cleaned = qclaw_mail_file.sanitize_email_body(body)
+
+        self.assertEqual(cleaned, "正文内容")
 
     def test_parse_batch_summary_json_from_code_fence(self):
         import qclaw_mail_file
@@ -761,7 +1305,7 @@ class SmokeTests(unittest.TestCase):
                 result = qclaw_mail_file.analyze_emails_with_llm(emails)
 
         self.assertIn("Executive Summary", result)
-        self.assertIn("[内嵌图片已省略", prompts["user_prompt"])
+        self.assertIn("[图片引用已省略]", prompts["user_prompt"])
         self.assertNotIn("data:image/png;base64", prompts["user_prompt"])
 
     def test_build_multimodal_user_blocks_uses_image_attachments(self):
@@ -998,6 +1542,56 @@ class SmokeTests(unittest.TestCase):
             sorted(item["_analysis_index"] for batch in batches for item in batch),
             [1, 2, 3],
         )
+
+    def test_split_emails_for_analysis_splits_two_long_emails(self):
+        import qclaw_mail_file
+
+        emails = [
+            {"body": ("alpha beta gamma delta\n" * 950), "subject": "1"},
+            {"body": ("theta lambda sigma omega\n" * 920), "subject": "2"},
+        ]
+
+        batches = qclaw_mail_file.split_emails_for_analysis(emails)
+
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(
+            sorted(item["_analysis_index"] for batch in batches for item in batch),
+            [1, 2],
+        )
+        self.assertTrue(all(len(batch) == 1 for batch in batches))
+
+    def test_build_emails_text_preserves_visual_context_when_truncating(self):
+        import qclaw_mail_file
+
+        long_prefix = "alpha beta gamma delta\n" * 900
+        visual_block = (
+            "[邮件级视觉上下文]\n"
+            "visual_status: ready\n"
+            "## Inline Visual Contexts\n"
+            "[Visual Context]\n"
+            "type: market_data_chart\n"
+            "role: market_signal\n"
+            "core_signal: 价格趋势显示明显走强。\n"
+        )
+        email = {
+            "_analysis_index": 1,
+            "subject": "1",
+            "from_name": "tester",
+            "from": "t@example.com",
+            "date": "2026-03-24",
+            "_analysis_body": long_prefix + "\n\n" + visual_block,
+        }
+
+        text = qclaw_mail_file.build_emails_text(
+            [email],
+            total_email_count=1,
+            total_body_budget=qclaw_mail_file.MAX_EMAIL_BODY_CHARS,
+        )
+
+        self.assertIn("[邮件级视觉上下文]", text)
+        self.assertIn("visual_status: ready", text)
+        self.assertIn("core_signal: 价格趋势显示明显走强。", text)
+        self.assertIn("【内容已截断", text)
 
     def test_format_html_report_uses_local_date_title(self):
         import qclaw_mail_file
@@ -1323,8 +1917,8 @@ class SmokeTests(unittest.TestCase):
             parsed = qclaw_mail_file.analyze_batch_summary_with_llm(emails, total_email_count=1, batch_index=1, batch_total=1)
 
         self.assertEqual(parsed["batch_index"], 1)
-        self.assertSharedReportPromptDiscipline(qclaw_mail_file, prompts["system"])
-        self.assertIn(qclaw_mail_file.get_batch_summary_stage_rules(), prompts["system"])
+        self.assertBatchPromptDiscipline(qclaw_mail_file, prompts["system"])
+        self.assertNotIn(qclaw_mail_file.get_hf_role_guidance(), prompts["system"])
         self.assertContainsAll(
             prompts["system"],
             ['"merge_key"', '"time_horizon"', '"target_slot"', '"fact_subject"', '"opinion_subject"', '"source_evidence"'],
@@ -1396,8 +1990,9 @@ class SmokeTests(unittest.TestCase):
                 total_email_count=1,
             )
 
-        self.assertSharedReportPromptDiscipline(qclaw_mail_file, prompts["system"])
-        self.assertIn(qclaw_mail_file.get_merge_stage_rules(1), prompts["system"])
+        self.assertMergePromptDiscipline(qclaw_mail_file, prompts["system"], 1)
+        self.assertNotIn(qclaw_mail_file.get_hf_role_guidance(), prompts["system"])
+        self.assertNotIn(qclaw_mail_file.get_merge_stage_rules(1), prompts["system"])
         self.assertIn(qclaw_mail_file.get_fixed_report_schema_prompt().strip(), prompts["system"])
         self.assertIn("只返回合法 JSON", prompts["user"])
 
@@ -2210,6 +2805,11 @@ class SmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(html.count('class="highlight"'), 1)
+
+
+for _name, _value in list(SmokeTests.__dict__.items()):
+    if _name.startswith("test_") and callable(_value):
+        setattr(LegacySmokeMixin, _name, _value)
 
 
 if __name__ == "__main__":

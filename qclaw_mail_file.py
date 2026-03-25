@@ -18,80 +18,65 @@ QClaw 邮件自动处理 - 文件交互版
 import os
 import sys
 import atexit
+import base64
 import yaml
 import json
 import time
 import glob
 import pytz
 import re
+import struct
 import logging
-import requests
 import traceback
-import fcntl
 from html import escape, unescape
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, List, Dict, Optional, Tuple
-from functools import wraps
 from io import BytesIO
 from urllib.parse import urlparse
 
 # ============ 配置 ============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.yaml")
-STATE_FILE = os.path.join(BASE_DIR, ".qclaw_state.json")
 REPORT_PREFIX = "report_"
 LOG_FILE = os.path.join(BASE_DIR, "qclaw.log")
-PENDING_FILE = os.path.join(BASE_DIR, "pending_emails.json")  # 兼容旧的文件交互流程
 ANALYSIS_LOCK_FILE = os.path.join(BASE_DIR, ".analysis.lock")
 
-# 导入数据库模块
-import sys
-sys.path.insert(0, BASE_DIR)
-import email_db
+from app import config as app_config
+from app.llm import client as app_llm_client
+from app.llm import json_utils as app_llm_json_utils
+from app.llm import prompts as app_llm_prompts
+from app.mail import fetcher as app_mail_fetcher
+from app.mail import service as app_mail_service
+from app.pipeline import email_preprocess as app_email_preprocess
+from app.pipeline import multimodal_pipeline as app_multimodal_pipeline
+from app.pipeline import report_payload as app_report_payload
+from app.pipeline import report_pipeline as app_report_pipeline
+from app.runtime import qclaw_runner as app_runtime_qclaw_runner
+from app.runtime import analysis_lock as app_analysis_lock
+from app.runtime import qclaw_runtime as app_runtime_qclaw_runtime
+from app.runtime import qclaw_support as app_runtime_qclaw_support
+from app.runtime import report_delivery as app_runtime_report_delivery
+from app.runtime import service_analysis as app_runtime_service_analysis
+from app.runtime import state as app_runtime_state
+from app.runtime import status_report as app_runtime_status_report
+from app.render import report_renderer as app_report_renderer
+from app.storage import email_db as app_storage_email_db
+email_db = app_storage_email_db
 
 # 时区
 BJT = pytz.timezone('Asia/Shanghai')
 
-# 邮件服务API
-EMAIL_API = "http://127.0.0.1:8877"
+LLM_CONFIG = app_config.DEFAULT_LLM_CONFIG.copy()
+LLM_BACKUP_CONFIG = app_config.DEFAULT_LLM_BACKUP_CONFIG.copy()
+LLM_BACKUP2_CONFIG = app_config.DEFAULT_LLM_BACKUP2_CONFIG.copy()
+LLM_BACKUP3_CONFIG = app_config.DEFAULT_LLM_BACKUP3_CONFIG.copy()
 
-# 主模型 API 配置（兼容 DashScope / Moonshot / OpenAI 等 Chat Completions 风格接口）
-LLM_CONFIG = {
-    "api_key": "",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "model": "qwen3-max",
-    "supports_vision": True,
-}
-
-# 备用 API 配置
-LLM_BACKUP_CONFIG = {
-    "api_key": "",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "model": "qwen-vl-max",
-    "supports_vision": True,
-}
-
-LLM_BACKUP2_CONFIG = {
-    "api_key": "",
-    "base_url": "https://api.moonshot.ai/v1",
-    "model": "kimi-k2.5",
-    "supports_vision": True,
-}
-
-LLM_BACKUP3_CONFIG = {
-    "api_key": "",
-    "api_key_env": "OPENAI_API_KEY",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-5.4",
-    "supports_vision": True,
-    "reasoning_effort": "medium",
-}
-
-# 向后兼容旧的 Kimi 命名，避免本地脚本/临时调试代码立刻失效。
-KIMI_CONFIG = LLM_CONFIG
-KIMI_BACKUP_CONFIG = LLM_BACKUP_CONFIG
-KIMI_BACKUP2_CONFIG = LLM_BACKUP2_CONFIG
-KIMI_BACKUP3_CONFIG = LLM_BACKUP3_CONFIG
+VISUAL_LLM_CONFIG = app_config.DEFAULT_VISUAL_LLM_CONFIG.copy()
+VISUAL_LLM_BACKUP_CONFIG = app_config.DEFAULT_VISUAL_LLM_BACKUP_CONFIG.copy()
+VISUAL_LLM_BACKUP2_CONFIG = app_config.DEFAULT_VISUAL_LLM_BACKUP2_CONFIG.copy()
+VISUAL_FAST_LLM_CONFIG = app_config.DEFAULT_VISUAL_FAST_LLM_CONFIG.copy()
+VISUAL_FAST_LLM_BACKUP_CONFIG = app_config.DEFAULT_VISUAL_FAST_LLM_BACKUP_CONFIG.copy()
 
 MAX_EMAIL_BODY_CHARS = 12000
 MAX_PROMPT_BODY_CHARS = 40000
@@ -100,6 +85,12 @@ BATCH_SPLIT_TRIGGER_CHARS = 26000
 MIN_TRUNCATION_CONTENT_CHARS = 40
 MAX_MULTIMODAL_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_MULTIMODAL_IMAGES = 8
+MAX_VISUAL_PIPELINE_IMAGES = 50
+MAX_DEEP_ANALYSIS_IMAGES = 15
+LIGHTWEIGHT_CLASSIFICATION_CONCURRENCY = 2
+DEEP_ANALYSIS_CONCURRENCY = 2
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif')
+MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS = 12000
 
 EMOJI_PATTERN = re.compile(
     "["
@@ -138,6 +129,11 @@ SIGNATURE_LINE_MARKERS = (
     "敬礼",
     "祝好",
     "谢谢",
+    "managing director",
+    "executive director",
+    "vice president",
+    "tech sector specialists:",
+    "us tech trading:",
     "--",
 )
 
@@ -155,755 +151,451 @@ DISCLAIMER_LINE_MARKERS = (
     "本电子邮件",
     "重要提示",
     "法律声明",
+    "disclaimers:",
+    "for institutional & professional clients only",
+    "not intended for retail customer use",
+    "this communication is intended for institutional & professional clients only",
+    "you are receiving this email because you are a client of j.p. morgan",
+    "if you would like to stop receiving",
+    "this material has been prepared by j.p. morgan sales and trading personnel",
+    "this material is provided for informational purposes only",
+    "this material is a “solicitation” of derivatives business only",
 )
 
-STANDALONE_SUBHEADINGS = {
-    "核心事实",
-    "市场怎么看",
-    "供应链与竞争方观点",
-    "投资影响",
-    "投资启示",
-    "长期（1-3月）",
-}
+ATTACHMENT_SIGNATURE_MARKERS = (
+    "best regards",
+    "kind regards",
+    "warm regards",
+    "regards",
+    "many thanks",
+    "thanks,",
+    "thanks and regards",
+    "thank you,",
+    "cheers,",
+    "sent from my iphone",
+    "sent from my ipad",
+    "sent from outlook",
+    "sent via outlook",
+    "此致",
+    "敬礼",
+    "祝好",
+    "谢谢",
+    "--",
+)
 
-SECTION_SUBHEADINGS = {
-    "Catalysts to Watch",
-}
+ATTACHMENT_DISCLAIMER_MARKERS = (
+    "免责声明",
+    "confidentiality notice",
+    "this message and any attachment",
+    "this e-mail and any attachments",
+    "this email and any attachments",
+    "the information contained in this e-mail",
+    "the information contained in this email",
+    "the contents of this email",
+    "privileged and confidential",
+    "本邮件及其附件",
+    "本电子邮件",
+    "重要提示",
+    "法律声明",
+)
 
-TIME_HORIZON_SUBHEADINGS = {
-    "短期（1-5天）",
-    "中期（1-4周）",
-}
+STANDALONE_SUBHEADINGS = app_report_renderer.STANDALONE_SUBHEADINGS
+SECTION_SUBHEADINGS = app_report_renderer.SECTION_SUBHEADINGS
+TIME_HORIZON_SUBHEADINGS = app_report_renderer.TIME_HORIZON_SUBHEADINGS
+SEMANTIC_CALLOUT_RULES = app_report_renderer.SEMANTIC_CALLOUT_RULES
+FIXED_DETAIL_LABELS = app_report_renderer.FIXED_DETAIL_LABELS
+SOURCE_LABEL_PATTERNS = app_report_renderer.SOURCE_LABEL_PATTERNS
+REPORT_OPTIMIZATION_CATEGORIES = app_report_renderer.REPORT_OPTIMIZATION_CATEGORIES
+FIXED_REPORT_TEMPLATE = app_report_renderer.FIXED_REPORT_TEMPLATE
 
-SEMANTIC_CALLOUT_RULES = {
-    "投资启示": "action-box",
-    "投资影响": "action-box",
-    "Action": "action-box",
-    "为什么重要": "signal-box",
-    "信号": "signal-box",
-    "原则": "principle-box",
-    "规则": "rule-box",
-    "底线": "redline-box",
-    "提醒": "reminder-box",
-}
-
-FIXED_DETAIL_LABELS = {"投资启示", "信号", "为什么重要", "Action"}
-
-# 报告格式治理说明
-# 原则：结构语义优先于模型原始标签；同一语义必须收敛到同一视觉组件。
-# 规则：标题层级、提示框、时间催化标题全部走确定性映射，不依赖模型“刚好写对”。
-# 底线：不得让同一个标签在不同报告里一会儿是普通段落、一会儿是底色框。
-# 提醒：prompt 只能尽量约束；最终稳定性必须由本地格式化规则兜底。
-
-SOURCE_LABEL_PATTERNS = [
-    ("MS", [r"\bmorgan stanley\b", r"\bms\b", r"摩根士丹利"]),
-    ("JPM", [r"\bj\.?\s?p\.?\s?morgan\b", r"\bjpm\b", r"摩根大通"]),
-    ("GS", [r"\bgoldman sachs\b", r"\bgs\b", r"高盛"]),
-    ("BofA", [r"\bbank of america\b", r"\bbofa\b", r"美银"]),
-    ("UBS", [r"\bubs\b", r"瑞银"]),
-    ("Citi", [r"\bciti\b", r"\bcitigroup\b", r"花旗"]),
-    ("Barclays", [r"\bbarclays\b", r"巴克莱"]),
-    ("Bernstein", [r"\bbernstein\b"]),
-]
-
-REPORT_OPTIMIZATION_CATEGORIES = {
-    "内容筛选": [
-        "普通功能升级、版本小更新、一般性运营通知默认降权，不挤占核心版面",
-        "核心事实只保留最硬的信息，避免长句和解释性废话",
-        "图片内容要与文本一起理解，但不单独占用杂乱版面",
-    ],
-    "归因纪律": [
-        "发件机构不等于观点主体，外部引述必须保留真实主语",
-        "带 says / according to / reports suggest / rumored 的内容默认不是核心事实",
-        "来源展示优先使用正文和主题里可识别的真实机构标签，如 MS、JPM",
-    ],
-    "结构模板": [
-        "Executive Summary 固定拆为 市场大背景 和 关键信号",
-        "核心事件与市场观点 固定按 事件标题 / 核心事实 / 市场怎么看 / 投资启示 展开",
-        "Actionable Ideas 固定包含 短期(1-5天) / 中期(1-4周) / Catalysts to Watch / Bottom Line",
-        "Actionable Ideas 需要站在全局上二次提炼最有行动价值的交易想法，而不是承接剩余信息",
-    ],
-    "格式底线": [
-        "阅读时间和来源 metadata 固定显示在标题下方，且只出现一次",
-        "highlight 不进入标题，只能留在正文",
-        "相同语义标签必须映射到相同结构，不允许同一模块今天是表格、明天是散段落",
-    ],
-}
-
-FIXED_REPORT_TEMPLATE = {
-    "executive_summary": ["市场大背景", "关键信号"],
-    "core_events_h2": "Key Coverage | 核心事件与市场观点",
-    "core_event_labels": ["核心事实", "市场怎么看", "投资启示"],
-    "local_news_h2": "Local News | 容易被忽略的信号",
-    "local_news_labels": ["信号", "为什么重要", "Action"],
-    "peripheral_h2": "Peripheral Intelligence | 外围信息/类比映射",
-    "peripheral_subsections": ["非核心公司事件 → 核心洞察", "跨市场信号"],
-    "actionable_h2": "Actionable Ideas",
-    "actionable_labels": ["短期(1-5天)", "中期(1-4周)", "Catalysts to Watch", "Bottom Line"],
-}
-
-# ============ 日志系统 ============
-def setup_logging():
-    """设置日志系统"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[
-            logging.FileHandler(LOG_FILE, encoding='utf-8', delay=True),
-            logging.StreamHandler(sys.stdout)
-        ],
-        force=True,
-    )
-    return logging.getLogger(__name__)
-
-logger = setup_logging()
+logger = app_runtime_qclaw_support.setup_file_logger(LOG_FILE, stream=sys.stdout)
 atexit.register(logging.shutdown)
+session = None
+proxy_session = None
+_RUNTIME_SETTINGS = None
 
-# ============ 代理设置 ============
-# 先保留原始代理配置，后面按提供方决定是否使用。
-ORIGINAL_PROXY_ENV = {
-    key: os.environ.get(key)
-    for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']
-    if os.environ.get(key)
-}
 
-# 移除系统代理环境变量（本地服务 / 本地 HTTP API 不需要代理）
-for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
-    os.environ.pop(key, None)
+def _ensure_llm_sessions():
+    global session
+    global proxy_session
 
-# 设置 NO_PROXY 绕过本地地址
-os.environ['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0'
-
-session = requests.Session()
-session.trust_env = False
-
-# 第三方 GPT 兼容入口依赖本地代理；这里显式继承我们在启动时捕获到的代理配置。
-proxy_session = requests.Session()
-proxy_session.trust_env = False
-proxy_session.proxies.update({
-    "http": ORIGINAL_PROXY_ENV.get("http_proxy") or ORIGINAL_PROXY_ENV.get("HTTP_PROXY"),
-    "https": ORIGINAL_PROXY_ENV.get("https_proxy") or ORIGINAL_PROXY_ENV.get("HTTPS_PROXY"),
-    "all": ORIGINAL_PROXY_ENV.get("ALL_PROXY"),
-})
-
-# 明确配置适配器，禁用代理
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-# 为HTTP和HTTPS配置不使用代理的adapter
-adapter = HTTPAdapter(
-    max_retries=3,
-    pool_connections=10,
-    pool_maxsize=10,
-)
-session.mount('http://', adapter)
-session.mount('https://', adapter)
-proxy_session.mount('http://', adapter)
-proxy_session.mount('https://', adapter)
+    if session is None or proxy_session is None:
+        session, proxy_session = app_runtime_qclaw_support.build_llm_sessions()
+    return session, proxy_session
 
 
 def llm_should_bypass_proxy(api_config: Dict[str, Any]) -> bool:
-    """按提供方选择网络策略。
-
-    当前经验规则：
-    - Moonshot 的 .cn 域名在这台机器上直连更稳定，避免代理层中断长请求。
-    - DashScope / 百炼兼容入口直连可用，优先避免代理增加额外不稳定性。
-    - 其他兼容 OpenAI 的入口（如第三方 GPT）允许走本地代理。
-    """
-    host = (urlparse(str((api_config or {}).get("base_url", "") or "")).hostname or "").lower()
-    return host.endswith("moonshot.cn") or host.endswith("dashscope.aliyuncs.com")
+    return app_llm_client.llm_should_bypass_proxy(api_config)
 
 
-def get_llm_http_session(api_config: Dict[str, Any]) -> requests.Session:
+def get_llm_http_session(api_config: Dict[str, Any]):
     """返回当前 LLM 请求应使用的 HTTP session。"""
-    return session if llm_should_bypass_proxy(api_config) else proxy_session
+    direct_session, proxied_session = _ensure_llm_sessions()
+    return app_llm_client.get_llm_http_session(
+        api_config,
+        direct_session=direct_session,
+        proxy_session=proxied_session,
+    )
 
 
-# ============ 重试装饰器 ============
-def retry_on_error(max_retries: int = 3, delay: float = 2.0, backoff: float = 2.0):
-    """
-    重试装饰器
-
-    参数:
-        max_retries: 最大重试次数
-        delay: 初始延迟（秒）
-        backoff: 退避系数
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            current_delay = delay
-            last_exception = None
-
-            for attempt in range(max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries:
-                        logger.warning(f"第 {attempt + 1} 次尝试失败: {e}, {current_delay:.1f}秒后重试...")
-                        time.sleep(current_delay)
-                        current_delay *= backoff
-                    else:
-                        logger.error(f"已达到最大重试次数 ({max_retries + 1}), 最终错误: {e}")
-
-            raise last_exception
-        return wrapper
-    return decorator
-
-
-# ============ 配置加载 ============
 def load_config():
     """加载配置文件"""
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+    global _RUNTIME_SETTINGS
+    _RUNTIME_SETTINGS = app_runtime_qclaw_runtime.load_runtime_settings(CONFIG_FILE, logger)
+    app_runtime_qclaw_runtime.apply_legacy_runtime_globals(globals(), _RUNTIME_SETTINGS)
+    return dict(_RUNTIME_SETTINGS["config"])
+
+
+def _get_runtime_settings(refresh: bool = False) -> Dict[str, Any]:
+    global _RUNTIME_SETTINGS
+    if refresh or _RUNTIME_SETTINGS is None:
+        load_config()
+    return _RUNTIME_SETTINGS or {}
+
+
+def _resolve_runtime_settings_for_compat() -> Dict[str, Any]:
+    config = load_config()
+    return {
+        "config": config,
+        "image_settings": app_config.build_image_pipeline_settings(config),
+        "llm_router_settings": app_config.build_llm_router_settings(config),
+    }
 
 
 def load_llm_config():
-    """加载主/备 LLM API 配置。兼容新的 llm.* 键和旧的 kimi.* 键。"""
-    config = load_config()
-    llm_cfg = config.get("llm") or config.get("kimi", {})
-
-    primary_key_env = str(llm_cfg.get("api_key_env", LLM_CONFIG.get("api_key_env", "")) or "").strip()
-    primary_api_key = str(llm_cfg.get("api_key", "") or "").strip()
-    if not primary_api_key and primary_key_env:
-        primary_api_key = str(os.getenv(primary_key_env, "") or "").strip()
-
-    LLM_CONFIG["api_key"] = primary_api_key
-    if primary_key_env:
-        LLM_CONFIG["api_key_env"] = primary_key_env
-    else:
-        LLM_CONFIG.pop("api_key_env", None)
-    LLM_CONFIG["base_url"] = llm_cfg.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    LLM_CONFIG["model"] = llm_cfg.get("model", "qwen3-max")
-    reasoning_effort = str(llm_cfg.get("reasoning_effort", LLM_CONFIG.get("reasoning_effort", "")) or "").strip()
-    if reasoning_effort:
-        LLM_CONFIG["reasoning_effort"] = reasoning_effort
-    else:
-        LLM_CONFIG.pop("reasoning_effort", None)
-    if "supports_vision" in llm_cfg:
-        LLM_CONFIG["supports_vision"] = bool(llm_cfg.get("supports_vision"))
-    else:
-        LLM_CONFIG["supports_vision"] = any(
-            token in LLM_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
-        )
-
-    # 加载备用 API 配置
-    backup_cfg = config.get("llm_backup") or config.get("kimi_backup", {})
-    backup_key_env = str(backup_cfg.get("api_key_env", LLM_BACKUP_CONFIG.get("api_key_env", "")) or "").strip()
-    backup_api_key = str(backup_cfg.get("api_key", "") or "").strip()
-    if not backup_api_key and backup_key_env:
-        backup_api_key = str(os.getenv(backup_key_env, "") or "").strip()
-
-    LLM_BACKUP_CONFIG["api_key"] = backup_api_key
-    if backup_key_env:
-        LLM_BACKUP_CONFIG["api_key_env"] = backup_key_env
-    else:
-        LLM_BACKUP_CONFIG.pop("api_key_env", None)
-    LLM_BACKUP_CONFIG["base_url"] = backup_cfg.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    LLM_BACKUP_CONFIG["model"] = backup_cfg.get("model", "qwen-vl-max")
-    backup_reasoning_effort = str(backup_cfg.get("reasoning_effort", LLM_BACKUP_CONFIG.get("reasoning_effort", "")) or "").strip()
-    if backup_reasoning_effort:
-        LLM_BACKUP_CONFIG["reasoning_effort"] = backup_reasoning_effort
-    else:
-        LLM_BACKUP_CONFIG.pop("reasoning_effort", None)
-    if "supports_vision" in backup_cfg:
-        LLM_BACKUP_CONFIG["supports_vision"] = bool(backup_cfg.get("supports_vision"))
-    else:
-        LLM_BACKUP_CONFIG["supports_vision"] = any(
-            token in LLM_BACKUP_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
-        )
-
-    backup2_cfg = config.get("llm_backup2") or config.get("kimi_backup2", {})
-    backup2_key_env = str(backup2_cfg.get("api_key_env", LLM_BACKUP2_CONFIG.get("api_key_env", "")) or "").strip()
-    backup2_api_key = str(backup2_cfg.get("api_key", "") or "").strip()
-    if not backup2_api_key and backup2_key_env:
-        backup2_api_key = str(os.getenv(backup2_key_env, "") or "").strip()
-
-    LLM_BACKUP2_CONFIG["api_key"] = backup2_api_key
-    if backup2_key_env:
-        LLM_BACKUP2_CONFIG["api_key_env"] = backup2_key_env
-    else:
-        LLM_BACKUP2_CONFIG.pop("api_key_env", None)
-    LLM_BACKUP2_CONFIG["base_url"] = backup2_cfg.get("base_url", "https://api.moonshot.ai/v1")
-    LLM_BACKUP2_CONFIG["model"] = backup2_cfg.get("model", "kimi-k2.5")
-    backup2_reasoning_effort = str(backup2_cfg.get("reasoning_effort", LLM_BACKUP2_CONFIG.get("reasoning_effort", "")) or "").strip()
-    if backup2_reasoning_effort:
-        LLM_BACKUP2_CONFIG["reasoning_effort"] = backup2_reasoning_effort
-    else:
-        LLM_BACKUP2_CONFIG.pop("reasoning_effort", None)
-    if "supports_vision" in backup2_cfg:
-        LLM_BACKUP2_CONFIG["supports_vision"] = bool(backup2_cfg.get("supports_vision"))
-    else:
-        LLM_BACKUP2_CONFIG["supports_vision"] = any(
-            token in LLM_BACKUP2_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
-        )
-
-    backup3_cfg = config.get("llm_backup3") or config.get("kimi_backup3", {})
-    backup3_key_env = str(backup3_cfg.get("api_key_env", LLM_BACKUP3_CONFIG.get("api_key_env", "")) or "").strip()
-    backup3_api_key = str(backup3_cfg.get("api_key", "") or "").strip()
-    if not backup3_api_key and backup3_key_env:
-        backup3_api_key = str(os.getenv(backup3_key_env, "") or "").strip()
-
-    LLM_BACKUP3_CONFIG["api_key"] = backup3_api_key
-    if backup3_key_env:
-        LLM_BACKUP3_CONFIG["api_key_env"] = backup3_key_env
-    else:
-        LLM_BACKUP3_CONFIG.pop("api_key_env", None)
-    LLM_BACKUP3_CONFIG["base_url"] = backup3_cfg.get("base_url", "https://api.openai.com/v1")
-    LLM_BACKUP3_CONFIG["model"] = backup3_cfg.get("model", "gpt-5.4")
-    backup3_reasoning_effort = str(backup3_cfg.get("reasoning_effort", LLM_BACKUP3_CONFIG.get("reasoning_effort", "")) or "").strip()
-    if backup3_reasoning_effort:
-        LLM_BACKUP3_CONFIG["reasoning_effort"] = backup3_reasoning_effort
-    else:
-        LLM_BACKUP3_CONFIG.pop("reasoning_effort", None)
-    if "supports_vision" in backup3_cfg:
-        LLM_BACKUP3_CONFIG["supports_vision"] = bool(backup3_cfg.get("supports_vision"))
-    else:
-        LLM_BACKUP3_CONFIG["supports_vision"] = any(
-            token in LLM_BACKUP3_CONFIG["model"].lower() for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5")
-        )
-
+    """加载主/备 LLM API 配置。"""
+    app_runtime_qclaw_runtime.apply_legacy_runtime_globals(
+        globals(),
+        _resolve_runtime_settings_for_compat(),
+    )
     return LLM_CONFIG
 
 
-# 向后兼容旧函数名。
-load_kimi_config = load_llm_config
+def load_visual_llm_config() -> Dict[str, Any]:
+    """加载图片深分析强模型配置。图片配置解析逻辑收口到 app.config。"""
+    app_runtime_qclaw_runtime.apply_legacy_runtime_globals(globals(), _resolve_runtime_settings_for_compat())
+    return VISUAL_LLM_CONFIG
+
+
+def load_visual_fast_llm_config() -> Dict[str, Any]:
+    """加载图片轻分类快模型配置。图片配置解析逻辑收口到 app.config。"""
+    app_runtime_qclaw_runtime.apply_legacy_runtime_globals(globals(), _resolve_runtime_settings_for_compat())
+    return VISUAL_FAST_LLM_CONFIG
 
 
 def try_acquire_analysis_lock():
     """获取分析流程互斥锁，避免并发重复发送。"""
-    lock_handle = open(ANALYSIS_LOCK_FILE, "w", encoding="utf-8")
-    try:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_handle.close()
-        return None
-
-    lock_handle.seek(0)
-    lock_handle.truncate()
-    lock_handle.write(str(os.getpid()))
-    lock_handle.flush()
-    return lock_handle
+    return app_analysis_lock.try_acquire_analysis_lock(ANALYSIS_LOCK_FILE)
 
 
 def release_analysis_lock(lock_handle) -> None:
-    if not lock_handle:
-        return
-    try:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-    try:
-        lock_handle.close()
-    except Exception:
-        pass
+    app_analysis_lock.release_analysis_lock(lock_handle)
 
 
 def model_supports_vision(api_config: Dict[str, Any]) -> bool:
-    """判断当前模型是否支持多模态图片输入。"""
-    if "supports_vision" in (api_config or {}):
-        return bool(api_config.get("supports_vision"))
-
-    model_name = str((api_config or {}).get("model", "")).lower()
-    return any(token in model_name for token in ("thinking-preview", "vision", "vl", "gpt-4.1", "gpt-4o", "gpt-5"))
+    return app_llm_client.model_supports_vision(api_config)
 
 
 def is_openai_chat_api(api_config: Dict[str, Any]) -> bool:
-    """判断当前配置是否指向 OpenAI 兼容官方入口。"""
-    base_url = str((api_config or {}).get("base_url", "") or "").lower()
-    return "api.openai.com" in base_url
+    return app_llm_client.is_openai_chat_api(api_config)
 
 
 def is_openai_gpt5_family(api_config: Dict[str, Any]) -> bool:
-    """判断是否为 OpenAI GPT-5 系列模型。"""
-    model_name = str((api_config or {}).get("model", "") or "").lower()
-    return model_name.startswith("gpt-5")
+    return app_llm_client.is_openai_gpt5_family(api_config)
 
 
 def supports_openai_json_schema_response_format(api_config: Dict[str, Any]) -> bool:
     """仅在已知支持的 OpenAI 官方模型上启用原生 JSON Schema 输出。"""
-    return is_openai_chat_api(api_config) and is_openai_gpt5_family(api_config)
+    return app_llm_client.supports_native_response_format(api_config)
 
 
 def build_json_schema_response_format(name: str, schema: Dict[str, Any], strict: bool = True) -> Dict[str, Any]:
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": name,
-            "strict": strict,
-            "schema": schema,
-        },
-    }
+    return app_llm_prompts.build_json_schema_response_format(name, schema, strict=strict)
 
 
 def build_batch_summary_response_format() -> Dict[str, Any]:
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["batch_index", "batch_total", "email_ids", "topics"],
-        "properties": {
-            "batch_index": {"type": "integer"},
-            "batch_total": {"type": "integer"},
-            "email_ids": {"type": "array", "items": {"type": "integer"}},
-            "topics": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "title",
-                        "email_ids",
-                        "coverage_count",
-                        "merge_key",
-                        "time_horizon",
-                        "target_slot",
-                        "fact_subject",
-                        "opinion_subject",
-                        "info_type",
-                        "core_facts",
-                        "market_takeaways",
-                        "tickers",
-                        "source_evidence",
-                    ],
-                    "properties": {
-                        "title": {"type": "string"},
-                        "email_ids": {"type": "array", "items": {"type": "integer"}},
-                        "coverage_count": {"type": "integer"},
-                        "merge_key": {"type": "string"},
-                        "time_horizon": {"type": "string"},
-                        "target_slot": {
-                            "type": "string",
-                            "enum": [
-                                "core_events",
-                                "local_news",
-                                "peripheral_intelligence",
-                                "actionable_ideas",
-                            ],
-                        },
-                        "fact_subject": {"type": "string"},
-                        "opinion_subject": {"type": "string"},
-                        "info_type": {"type": "string"},
-                        "core_facts": {"type": "array", "items": {"type": "string"}},
-                        "market_takeaways": {"type": "array", "items": {"type": "string"}},
-                        "tickers": {"type": "array", "items": {"type": "string"}},
-                        "source_evidence": {"type": "array", "items": {"type": "string"}},
-                    },
-                },
-            },
-        },
-    }
-    return build_json_schema_response_format("hf_batch_summary", schema)
+    return app_llm_prompts.build_batch_summary_response_format()
 
 
 def build_report_response_format() -> Dict[str, Any]:
-    market_view_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["source", "stance", "thesis"],
-        "properties": {
-            "source": {"type": "string"},
-            "stance": {"type": "string"},
-            "thesis": {"type": "string"},
-            "stance_highlight_phrases": {"type": "array", "items": {"type": "string"}},
-            "thesis_highlight_phrases": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    core_event_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "headline",
-            "priority_rank",
-            "coverage_count",
-            "global_score",
-            "source_topics",
-            "core_facts",
-            "market_views",
-            "action",
-            "attribution_note",
-            "source_evidence",
-        ],
-        "properties": {
-            "headline": {"type": "string"},
-            "priority_rank": {"type": "integer"},
-            "coverage_count": {"type": "integer"},
-            "global_score": {"type": "number"},
-            "source_topics": {"type": "array", "items": {"type": "string"}},
-            "core_facts": {"type": "array", "items": {"type": "string"}},
-            "market_views": {"type": "array", "items": market_view_schema},
-            "action": {"type": "string"},
-            "highlight_phrases": {"type": "array", "items": {"type": "string"}},
-            "attribution_note": {"type": "string"},
-            "source_evidence": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    local_news_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["headline", "priority_rank", "signal", "importance", "action"],
-        "properties": {
-            "headline": {"type": "string"},
-            "priority_rank": {"type": "integer"},
-            "signal": {"type": "string"},
-            "importance": {"type": "string"},
-            "action": {"type": "string"},
-            "highlight_phrases": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    mapped_event_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["event", "related_company", "mapping"],
-        "properties": {
-            "event": {"type": "string"},
-            "related_company": {"type": "string"},
-            "mapping": {"type": "string"},
-        },
-    }
-    cross_market_signal_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["headline", "priority_rank", "bullets"],
-        "properties": {
-            "headline": {"type": "string"},
-            "priority_rank": {"type": "integer"},
-            "bullets": {"type": "array", "items": {"type": "string"}},
-            "highlight_phrases": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    actionable_item_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "idea",
-            "priority_rank",
-            "coverage_count",
-            "global_score",
-            "source_topics",
-            "linked_core_event_headlines",
-        ],
-        "properties": {
-            "idea": {"type": "string"},
-            "priority_rank": {"type": "integer"},
-            "coverage_count": {"type": "integer"},
-            "global_score": {"type": "number"},
-            "source_topics": {"type": "array", "items": {"type": "string"}},
-            "linked_core_event_headlines": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    catalyst_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "catalyst",
-            "time",
-            "impact",
-            "priority_rank",
-            "coverage_count",
-            "global_score",
-            "source_topics",
-            "linked_core_event_headlines",
-        ],
-        "properties": {
-            "catalyst": {"type": "string"},
-            "time": {"type": "string"},
-            "impact": {"type": "string"},
-            "priority_rank": {"type": "integer"},
-            "coverage_count": {"type": "integer"},
-            "global_score": {"type": "number"},
-            "source_topics": {"type": "array", "items": {"type": "string"}},
-            "linked_core_event_headlines": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "executive_summary",
-            "core_events",
-            "local_news",
-            "peripheral_intelligence",
-            "actionable_ideas",
-        ],
-        "properties": {
-            "executive_summary": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["market_background", "key_signals"],
-                "properties": {
-                    "market_background": {"type": "string"},
-                    "key_signals": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-            "core_events": {"type": "array", "items": core_event_schema},
-            "local_news": {"type": "array", "items": local_news_schema},
-            "peripheral_intelligence": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["mapped_events", "cross_market_signals"],
-                "properties": {
-                    "mapped_events": {"type": "array", "items": mapped_event_schema},
-                    "cross_market_signals": {"type": "array", "items": cross_market_signal_schema},
-                },
-            },
-            "actionable_ideas": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["short_term", "medium_term", "catalysts", "bottom_line"],
-                "properties": {
-                    "short_term": {"type": "array", "items": actionable_item_schema},
-                    "medium_term": {"type": "array", "items": actionable_item_schema},
-                    "catalysts": {"type": "array", "items": catalyst_schema},
-                    "bottom_line": {"type": "string"},
-                },
-            },
-        },
-    }
-    return build_json_schema_response_format("hf_morning_brief_report", schema)
+    return app_llm_prompts.build_report_response_format()
 
 
 def parse_attachment_list(raw_attachments: Any) -> List[Dict]:
-    """兼容 attachments 字段的 JSON 字符串或列表结构。"""
-    if not raw_attachments:
-        return []
-    if isinstance(raw_attachments, list):
-        return [item for item in raw_attachments if isinstance(item, dict)]
-    if isinstance(raw_attachments, str):
-        try:
-            parsed = json.loads(raw_attachments)
-        except Exception:
-            return []
-        if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict)]
-    return []
+    return app_multimodal_pipeline.parse_attachment_list(raw_attachments)
+
+
+def _extract_attachment_bytes(att):
+    return app_mail_fetcher.extract_attachment_bytes(att)
+
+
+def _clean_extracted_attachment_text(text, filename=""):
+    return app_mail_fetcher.clean_extracted_attachment_text(
+        text,
+        filename=filename,
+        max_extracted_attachment_text_chars=MAX_EXTRACTED_ATTACHMENT_TEXT_CHARS,
+        attachment_signature_markers=ATTACHMENT_SIGNATURE_MARKERS,
+        attachment_disclaimer_markers=ATTACHMENT_DISCLAIMER_MARKERS,
+    )
+
+
+def _build_attachment_records(msg):
+    return app_mail_fetcher.build_attachment_records(
+        msg,
+        image_extensions=IMAGE_EXTENSIONS,
+        max_multimodal_image_bytes=MAX_MULTIMODAL_IMAGE_BYTES,
+        extract_attachment_bytes_fn=_extract_attachment_bytes,
+        clean_extracted_attachment_text_fn=_clean_extracted_attachment_text,
+        logger=logger,
+    )
+
+
+def get_message_local_datetime(msg_datetime, local_tz):
+    return app_mail_fetcher.get_message_local_datetime(msg_datetime, local_tz)
+
+
+def should_accept_sender(from_addr: str, allowed_senders: list) -> bool:
+    return app_mail_fetcher.should_accept_sender(
+        from_addr,
+        allowed_senders,
+        extract_sender_email_fn=app_mail_fetcher.extract_sender_email,
+        match_allowed_sender_fn=app_mail_fetcher.match_allowed_sender,
+    )
+
+
+def parse_received_after_local(filters: dict, local_tz):
+    return app_mail_fetcher.parse_received_after_local(filters, local_tz, logger)
 
 
 def estimate_data_url_image_bytes(data_url: str) -> int:
-    """粗略估算 data URL 图片体积，用于过滤过大的正文内嵌图片。"""
-    if not data_url or "," not in data_url:
-        return 0
-    encoded = data_url.split(",", 1)[1]
-    compact = re.sub(r"\s+", "", encoded)
-    padding = compact.count("=")
-    return max(0, (len(compact) * 3) // 4 - padding)
+    return app_multimodal_pipeline.estimate_data_url_image_bytes(data_url)
 
 
 def extract_inline_body_image_data_urls(body: str) -> List[str]:
-    """从 HTML 正文里提取 data:image 内嵌图片。"""
-    if not body:
-        return []
-
-    matches = re.findall(
-        r"data:image/[^;'\"]+;base64,[A-Za-z0-9+/=\s]+",
-        body,
-        flags=re.IGNORECASE,
-    )
-
-    data_urls = []
-    seen = set()
-    for match in matches:
-        compact = re.sub(r"\s+", "", match)
-        if compact in seen:
-            continue
-        seen.add(compact)
-        data_urls.append(compact)
-    return data_urls
+    return app_multimodal_pipeline.extract_inline_body_image_data_urls(body)
 
 
 def build_multimodal_user_blocks(emails: List[Dict], api_config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """从邮件附件里提取可直接送入模型的图片块。"""
-    if not model_supports_vision(api_config or {}):
-        return []
+    return app_multimodal_pipeline.build_multimodal_user_blocks(
+        emails,
+        api_config=api_config,
+        model_supports_vision_fn=model_supports_vision,
+        max_multimodal_images=MAX_MULTIMODAL_IMAGES,
+        logger=logger,
+    )
 
-    blocks: List[Dict[str, Any]] = []
-    image_count = 0
-    total_images = 0
-    seen_urls = set()
 
-    for fallback_index, email in enumerate(emails, 1):
-        email_index = email.get("_analysis_index", fallback_index)
-        subject = email.get("subject", "") or "(无主题)"
-        body = email.get("body", "") or ""
-        attachments = parse_attachment_list(email.get("attachments"))
+def _decode_image_bytes_from_data_url(data_url: str) -> bytes:
+    return app_multimodal_pipeline.decode_data_url_image_bytes(data_url)
 
-        for attachment in attachments:
-            if attachment.get("kind") != "image":
-                continue
 
-            content_type = attachment.get("content_type", "") or "image/*"
-            data_url = attachment.get("data_url")
-            size = int(attachment.get("size") or 0)
-            if not content_type.startswith("image/") or not data_url:
-                continue
-            if size and size > MAX_MULTIMODAL_IMAGE_BYTES:
-                continue
-            compact_url = re.sub(r"\s+", "", data_url)
-            if compact_url in seen_urls:
-                continue
-            total_images += 1
-            if image_count >= MAX_MULTIMODAL_IMAGES:
-                seen_urls.add(compact_url)
-                continue
+def _extract_image_dimensions_from_data_url(data_url: str) -> Tuple[Optional[int], Optional[int]]:
+    return app_multimodal_pipeline.extract_image_dimensions_from_data_url(data_url)
 
-            filename = attachment.get("filename", "image")
-            blocks.append({
-                "type": "text",
-                "text": (
-                    f"下面是一张来自邮件 {email_index}《{subject}》的图片附件：{filename}。"
-                    "请结合对应邮件正文一起理解，不要脱离邮件上下文单独脑补。"
-                ),
-            })
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": compact_url},
-            })
-            image_count += 1
-            seen_urls.add(compact_url)
 
-        for inline_index, data_url in enumerate(extract_inline_body_image_data_urls(body), 1):
-            compact_url = re.sub(r"\s+", "", data_url)
-            if compact_url in seen_urls:
-                continue
+def _parse_json_object_relaxed(raw_text: str) -> Dict[str, Any]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
 
-            estimated_size = estimate_data_url_image_bytes(compact_url)
-            if estimated_size and estimated_size > MAX_MULTIMODAL_IMAGE_BYTES:
-                continue
-            total_images += 1
-            if image_count >= MAX_MULTIMODAL_IMAGES:
-                seen_urls.add(compact_url)
-                continue
-            blocks.append({
-                "type": "text",
-                "text": (
-                    f"下面是一张直接内嵌在邮件 {email_index}《{subject}》正文中的图片（内嵌图 {inline_index}）。"
-                    "请结合该邮件的上下文理解图片内容。"
-                ),
-            })
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": compact_url},
-            })
-            image_count += 1
-            seen_urls.add(compact_url)
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text, count=1)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+    block = text[start:end + 1]
+    try:
+        return json.loads(block)
+    except Exception:
+        pass
+    try:
+        payload = yaml.safe_load(block)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
-    if total_images:
-        logger.info(
-            f"🖼️ 本轮共识别到 {total_images} 张可用图片；"
-            f"按当前上限送入其中 {image_count} 张进入多模态分析"
-        )
 
-    return blocks
+def collect_multimodal_images(
+    emails: List[Dict[str, Any]],
+    api_config: Optional[Dict[str, Any]] = None,
+    max_multimodal_images: Optional[int] = None,
+) -> Dict[str, Any]:
+    return app_multimodal_pipeline.collect_multimodal_images_for_analysis(
+        emails,
+        api_config=api_config,
+        load_visual_fast_llm_config_fn=load_visual_fast_llm_config,
+        model_supports_vision_fn=model_supports_vision,
+        max_multimodal_images=max_multimodal_images,
+        logger=logger,
+    )
+
+
+def build_visual_llm_chain(primary_cfg: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    return app_llm_client.build_named_config_chain(
+        primary_cfg,
+        primary_key="visual_primary",
+        primary_label="视觉主模型",
+        backup_configs=[VISUAL_LLM_BACKUP_CONFIG, VISUAL_LLM_BACKUP2_CONFIG],
+        backup_key_prefix="visual_backup",
+        backup_label_prefix="视觉备用模型",
+    )
+
+
+def build_visual_fast_llm_chain(primary_cfg: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    return app_llm_client.build_named_config_chain(
+        primary_cfg,
+        primary_key="visual_fast_primary",
+        primary_label="视觉快模型",
+        backup_configs=[VISUAL_FAST_LLM_BACKUP_CONFIG],
+        backup_key_prefix="visual_fast_backup",
+        backup_label_prefix="视觉快模型备用",
+    )
+
+
+def _call_llm_with_config_chain(
+    chain: List[Tuple[str, str, Dict[str, Any]]],
+    system_prompt: str,
+    user_prompt: str,
+    label: str,
+    user_content_blocks: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    return app_llm_client.call_llm_with_config_chain(
+        chain,
+        system_prompt,
+        user_prompt,
+        label=label,
+        user_content_blocks=user_content_blocks,
+        model_supports_vision_fn=model_supports_vision,
+        call_llm_api_with_retries_fn=call_llm_api_with_retries,
+        logger=logger,
+    )
+
+
+def _call_visual_fast_llm_for_pipeline(
+    api_config: Dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    label: str,
+    max_retries: int = 0,
+    user_content_blocks: Optional[List[Dict[str, Any]]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    del max_retries, response_format
+    return _call_llm_with_config_chain(
+        build_visual_fast_llm_chain(api_config),
+        system_prompt,
+        user_prompt,
+        label=label,
+        user_content_blocks=user_content_blocks,
+    )
+
+
+def _call_visual_deep_llm_for_pipeline(
+    api_config: Dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    label: str,
+    max_retries: int = 0,
+    user_content_blocks: Optional[List[Dict[str, Any]]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    del max_retries, response_format
+    return _call_llm_with_config_chain(
+        build_visual_llm_chain(api_config),
+        system_prompt,
+        user_prompt,
+        label=label,
+        user_content_blocks=user_content_blocks,
+    )
+
+
+def _classify_multimodal_images_lightweight(
+    images: List[Dict[str, Any]],
+    api_config: Optional[Dict[str, Any]] = None,
+    classification_concurrency: Optional[int] = None,
+) -> Dict[str, Dict[str, str]]:
+    return app_multimodal_pipeline.classify_multimodal_images_lightweight_for_pipeline(
+        images,
+        api_config=api_config,
+        load_visual_fast_llm_config_fn=load_visual_fast_llm_config,
+        classification_concurrency=classification_concurrency,
+        default_classification_concurrency=LIGHTWEIGHT_CLASSIFICATION_CONCURRENCY,
+        model_supports_vision_fn=model_supports_vision,
+        call_llm_api_with_retries_fn=_call_visual_fast_llm_for_pipeline,
+        load_json_dict_with_fallbacks_fn=load_json_dict_with_fallbacks,
+        logger=logger,
+    )
+
+
+def _deep_analyze_multimodal_images(
+    image_objects: List[Dict[str, Any]],
+    api_config: Optional[Dict[str, Any]] = None,
+    max_deep_analysis_images: Optional[int] = None,
+    deep_analysis_concurrency: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    return app_multimodal_pipeline.deep_analyze_multimodal_images_for_pipeline(
+        image_objects,
+        api_config=api_config,
+        load_visual_llm_config_fn=load_visual_llm_config,
+        max_deep_analysis_images=max_deep_analysis_images,
+        default_max_deep_analysis_images=MAX_DEEP_ANALYSIS_IMAGES,
+        deep_analysis_concurrency=deep_analysis_concurrency,
+        default_deep_analysis_concurrency=DEEP_ANALYSIS_CONCURRENCY,
+        model_supports_vision_fn=model_supports_vision,
+        call_llm_api_with_retries_fn=_call_visual_deep_llm_for_pipeline,
+        load_json_dict_with_fallbacks_fn=load_json_dict_with_fallbacks,
+        normalize_string_list_fn=normalize_string_list,
+        logger=logger,
+    )
+
+
+def render_email_visual_context_text(context: Dict[str, Any]) -> str:
+    return app_multimodal_pipeline.render_email_visual_context_text(context)
+
+
+def build_email_visual_context_map_for_analysis(
+    emails: List[Dict[str, Any]],
+    api_config: Optional[Dict[str, Any]] = None,
+) -> Dict[int, Dict[str, Any]]:
+    return app_runtime_qclaw_runtime.build_email_visual_context_map_for_analysis(
+        emails,
+        api_config=api_config,
+        load_config_fn=load_config,
+        build_image_pipeline_settings_fn=app_config.build_image_pipeline_settings,
+        load_visual_fast_llm_config_fn=load_visual_fast_llm_config,
+        load_visual_llm_config_fn=load_visual_llm_config,
+        model_supports_vision_fn=model_supports_vision,
+        classify_images_fn=_classify_multimodal_images_lightweight,
+        deep_analyze_images_fn=_deep_analyze_multimodal_images,
+        get_email_visual_context_fn=app_storage_email_db.get_email_visual_context,
+        get_email_visual_contexts_fn=app_storage_email_db.get_email_visual_contexts,
+        get_email_image_analysis_records_fn=app_storage_email_db.get_email_image_analysis_records,
+        get_email_image_analysis_records_map_fn=app_storage_email_db.get_email_image_analysis_records_map,
+        upsert_email_images_fn=app_storage_email_db.upsert_email_images,
+        upsert_email_images_batch_fn=app_storage_email_db.upsert_email_images_batch,
+        update_image_classifications_fn=app_storage_email_db.update_image_classifications,
+        update_image_classifications_batch_fn=app_storage_email_db.update_image_classifications_batch,
+        upsert_image_analysis_results_fn=app_storage_email_db.upsert_image_analysis_results,
+        upsert_image_analysis_results_batch_fn=app_storage_email_db.upsert_image_analysis_results_batch,
+        save_email_visual_context_fn=app_storage_email_db.save_email_visual_context,
+        save_email_visual_contexts_batch_fn=app_storage_email_db.save_email_visual_contexts_batch,
+        logger=logger,
+    )
 
 
 def build_llm_chain(primary_cfg: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
-    return [
-        ("primary", "主API", primary_cfg),
-        ("backup1", "备用API", LLM_BACKUP_CONFIG),
-        ("backup2", "备用API2", LLM_BACKUP2_CONFIG),
-        ("backup3", "备用API3", LLM_BACKUP3_CONFIG),
-    ]
+    return app_llm_client.build_llm_chain(
+        primary_cfg,
+        backup_configs=[LLM_BACKUP_CONFIG, LLM_BACKUP2_CONFIG, LLM_BACKUP3_CONFIG],
+    )
 
 
 def get_ordered_llm_chain(
@@ -925,147 +617,87 @@ def get_ordered_llm_chain(
     return preferred_items + remaining
 
 
+def choose_visual_analysis_api_config(
+    routing_state: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    return app_llm_client.choose_visual_analysis_api_config(
+        routing_state,
+        load_llm_config_fn=load_llm_config,
+        get_ordered_llm_chain_fn=lambda primary_cfg, state: get_ordered_llm_chain(
+            primary_cfg,
+            routing_state=state,
+        ),
+        model_supports_vision_fn=model_supports_vision,
+    )
+
+
 def normalize_marker_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
 
 
 def strip_signature_and_disclaimer(body: str) -> str:
-    """裁掉邮件尾部的署名、免责声明和设备签名，给模型释放上下文。"""
-    if not body:
-        return ""
-
-    text = body.replace("\r\n", "\n").replace("\r", "\n")
-    lines = text.split("\n")
-    cut_index = None
-    meaningful_chars = 0
-    non_empty_lines = 0
-
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-
-        normalized = normalize_marker_text(stripped)
-        has_enough_content = meaningful_chars >= MIN_TRUNCATION_CONTENT_CHARS or non_empty_lines >= 3
-
-        if has_enough_content:
-            if any(normalized.startswith(marker) for marker in SIGNATURE_LINE_MARKERS) and len(stripped) <= 120:
-                cut_index = idx
-                break
-            if any(marker in normalized for marker in DISCLAIMER_LINE_MARKERS):
-                cut_index = idx
-                break
-
-        meaningful_chars += len(stripped)
-        non_empty_lines += 1
-
-    if cut_index is not None:
-        return "\n".join(lines[:cut_index]).strip()
-    return text.strip()
+    return app_email_preprocess.strip_signature_and_disclaimer(
+        body,
+        min_truncation_content_chars=MIN_TRUNCATION_CONTENT_CHARS,
+        signature_line_markers=SIGNATURE_LINE_MARKERS,
+        disclaimer_line_markers=DISCLAIMER_LINE_MARKERS,
+        normalize_marker_text_fn=normalize_marker_text,
+    )
 
 
 def sanitize_email_body(body: str) -> str:
-    """清理超大/无效的嵌入内容，避免 prompt 被 base64、HTML 和免责声明撑爆。"""
-    if not body:
-        return ""
-
-    sanitized = body.replace("\r\n", "\n").replace("\r", "\n")
-    sanitized = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", sanitized)
-    sanitized = re.sub(r"(?i)<br\s*/?>", "\n", sanitized)
-    sanitized = re.sub(r"(?i)</(p|div|tr|li|h[1-6])>", "\n", sanitized)
-    sanitized = re.sub(r"(?is)<li[^>]*>", "• ", sanitized)
-    sanitized = re.sub(
-        r"<img[^>]+src=['\"]data:image/[^'\"]+['\"][^>]*>",
-        "[内嵌图片已省略：如为附件图片，将通过多模态链路单独送入模型]",
-        sanitized,
-        flags=re.IGNORECASE,
+    return app_email_preprocess.sanitize_email_body(
+        body,
+        strip_signature_and_disclaimer_fn=strip_signature_and_disclaimer,
     )
-    sanitized = re.sub(r"(?is)<img[^>]*>", "[图片引用已省略]", sanitized)
-    sanitized = re.sub(
-        r"data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+",
-        "[图片数据已省略]",
-        sanitized,
-        flags=re.IGNORECASE,
+
+
+def prepare_emails_for_analysis(
+    emails: List[Dict],
+    api_config: Optional[Dict[str, Any]] = None,
+) -> List[Dict]:
+    return app_runtime_qclaw_runtime.prepare_emails_for_analysis(
+        emails,
+        api_config=api_config,
+        sanitize_email_body_fn=sanitize_email_body,
+        build_email_visual_context_map_for_analysis_fn=build_email_visual_context_map_for_analysis,
+        render_email_visual_context_text_fn=render_email_visual_context_text,
     )
-    sanitized = re.sub(r"[A-Za-z0-9+/=]{500,}", "[长编码内容已省略]", sanitized)
-    sanitized = re.sub(r"(?is)<[^>]+>", " ", sanitized)
-    sanitized = unescape(sanitized)
-    sanitized = strip_signature_and_disclaimer(sanitized)
-    sanitized = re.sub(r"[ \t]+\n", "\n", sanitized)
-    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
-    return sanitized.strip()
 
 
-def prepare_emails_for_analysis(emails: List[Dict]) -> List[Dict]:
-    prepared = []
-    for idx, email in enumerate(emails, 1):
-        item = dict(email)
-        body = sanitize_email_body(email.get("body", ""))
-        item["_analysis_index"] = idx
-        item["_analysis_body"] = body
-        item["_analysis_body_len"] = len(body)
-        prepared.append(item)
-    return prepared
+def split_emails_for_analysis(
+    emails: List[Dict],
+    api_config: Optional[Dict[str, Any]] = None,
+) -> List[List[Dict]]:
+    return app_runtime_qclaw_runtime.split_emails_for_analysis(
+        emails,
+        api_config=api_config,
+        prepare_emails_for_analysis_with_visual_context_fn=prepare_emails_for_analysis,
+    )
 
 
-def split_emails_for_analysis(emails: List[Dict]) -> List[List[Dict]]:
-    """当上下文仍然偏长时，拆成两个批次分析，降低单次模型压力。"""
-    prepared = prepare_emails_for_analysis(emails)
-    total_chars = sum(min(email["_analysis_body_len"], MAX_EMAIL_BODY_CHARS) for email in prepared)
-
-    if len(prepared) <= 1 or total_chars <= BATCH_SPLIT_TRIGGER_CHARS:
-        return [prepared]
-
-    buckets = [[], []]
-    bucket_sizes = [0, 0]
-
-    for email in sorted(prepared, key=lambda item: item["_analysis_body_len"], reverse=True):
-        target_idx = 0 if bucket_sizes[0] <= bucket_sizes[1] else 1
-        buckets[target_idx].append(email)
-        bucket_sizes[target_idx] += min(email["_analysis_body_len"], MAX_EMAIL_BODY_CHARS)
-
-    result = []
-    for bucket in buckets:
-        if bucket:
-            result.append(sorted(bucket, key=lambda item: item["_analysis_index"]))
-    return result
+def truncate_analysis_body_preserving_visual_context(
+    body: str,
+    *,
+    body_budget: int,
+    original_len: int,
+) -> str:
+    return app_email_preprocess.truncate_analysis_body_preserving_visual_context(
+        body,
+        body_budget=body_budget,
+        original_len=original_len,
+    )
 
 
 def build_emails_text(emails: List[Dict], total_email_count: int, total_body_budget: int) -> str:
-    emails_summary = []
-    total_body_chars = 0
-
-    for fallback_index, email in enumerate(emails, 1):
-        subject = email.get("subject", "")
-        from_name = email.get("from_name", "")
-        from_addr = email.get("from", "")
-        date = email.get("date", "")
-        body = email.get("_analysis_body", sanitize_email_body(email.get("body", "")))
-        original_len = len(body)
-        email_index = email.get("_analysis_index", fallback_index)
-
-        remaining = max(total_body_budget - total_body_chars, 0)
-        if remaining <= 0:
-            body = "【内容已省略：本轮邮件总长度超出模型输入预算】"
-        else:
-            body_budget = min(MAX_EMAIL_BODY_CHARS, remaining)
-            if len(body) > body_budget:
-                body = (
-                    body[:body_budget]
-                    + f"\n\n【内容已截断：原始长度 {original_len} 字符，为控制模型输入长度仅保留前 {body_budget} 字符】"
-                )
-        total_body_chars += len(body)
-
-        emails_summary.append(f"""
---- 邮件 {email_index}/{total_email_count} ---
-发件人: {from_name} <{from_addr}>
-时间: {date}
-主题: {subject}
-正文:
-{body}
-""")
-
-    return "\n".join(emails_summary)
+    return app_email_preprocess.build_emails_text_with_budget(
+        emails,
+        total_email_count,
+        total_body_budget,
+        sanitize_email_body_fn=sanitize_email_body,
+        max_email_body_chars=MAX_EMAIL_BODY_CHARS,
+        truncate_analysis_body_preserving_visual_context_fn=truncate_analysis_body_preserving_visual_context,
+    )
 
 
 def generate_with_llm(
@@ -1083,9 +715,23 @@ def generate_with_llm(
     ordered_chain = get_ordered_llm_chain(llm_cfg, routing_state)
     for model_key, label, api_cfg in ordered_chain:
         api_key = api_cfg.get("api_key", "")
-        multimodal_blocks = build_multimodal_user_blocks(emails or [], api_cfg)
-        if multimodal_blocks:
-            logger.info(f"🖼️ {label} 将接收 {len(multimodal_blocks) // 2} 张图片进行多模态分析")
+        user_content_blocks = (
+            build_multimodal_user_blocks(emails or [], api_cfg)
+            if emails
+            else None
+        )
+        visual_statuses = {
+            str(email.get("_visual_status") or "").strip().lower()
+            for email in (emails or [])
+            if str(email.get("_visual_status") or "").strip()
+        }
+        if emails:
+            if user_content_blocks:
+                logger.info(f"🖼️ {label} 将接收 {len(user_content_blocks) // 2} 张图片进行多模态分析")
+            elif visual_statuses & {"ready", "empty"}:
+                logger.info(f"🧩 {label} 检测到邮件级视觉上下文，主摘要阶段跳过原图直传")
+            else:
+                logger.info(f"🧩 {label} 未发现可用视觉上下文，主摘要阶段按纯文本邮件处理")
 
         if not api_key:
             key_hint = api_cfg.get("api_key_env") or f"{model_key}.api_key"
@@ -1105,7 +751,7 @@ def generate_with_llm(
             max_retries=1,
             delay=5.0 if label == "主API" else 3.0,
             backoff=2.0,
-            user_content_blocks=multimodal_blocks,
+            user_content_blocks=user_content_blocks,
             response_format=response_format,
         )
         if result:
@@ -1113,7 +759,7 @@ def generate_with_llm(
                 routing_state["preferred_model_key"] = model_key
             return result
 
-        if multimodal_blocks:
+        if user_content_blocks:
             logger.warning(f"⚠️ {label} 多模态请求失败，降级为纯文本重试")
             result = call_llm_api_with_retries(
                 api_cfg,
@@ -1141,20 +787,7 @@ def generate_with_llm(
 
 def extract_json_block(text: str) -> str:
     """从模型输出中提取 JSON 主体，兼容 ```json 代码块。"""
-    if not text:
-        raise ValueError("empty json response")
-
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned, count=1)
-        cleaned = cleaned.strip()
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("json object not found")
-    return cleaned[start:end + 1]
+    return app_llm_json_utils.extract_json_block(text)
 
 
 def save_malformed_json_snapshot(raw_text: str, prefix: str = "malformed_report_payload") -> Optional[str]:
@@ -1173,266 +806,62 @@ def save_malformed_json_snapshot(raw_text: str, prefix: str = "malformed_report_
 
 def load_json_dict_with_fallbacks(raw_text: str) -> Dict[str, Any]:
     """优先严格 JSON，失败时允许用 YAML 宽松解析。"""
-    block = extract_json_block(raw_text)
-    try:
-        payload = json.loads(block)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
-
-    try:
-        payload = yaml.safe_load(block)
-        if isinstance(payload, dict):
-            logger.warning("⚠️ JSON 严格解析失败，已用 YAML 宽松解析兜底")
-            return payload
-    except Exception:
-        pass
-
-    raise ValueError("unable to parse json payload")
+    return app_llm_json_utils.load_json_dict_with_fallbacks(raw_text)
 
 
 def repair_report_payload_json(raw_text: str) -> Dict[str, Any]:
     """当模型返回的 JSON 不合法时，尝试做一次短请求修复。"""
-    save_malformed_json_snapshot(raw_text)
-    repair_system_prompt = """你是一个严格的 JSON 修复器。
-
-任务：
-1. 你会收到一段“接近 JSON 但不合法”的文本
-2. 在不发明新事实、不改变原意的前提下，把它修复成合法 JSON
-3. 只输出一个合法 JSON 对象，不要解释，不要 Markdown
-4. 保留原有字段结构，尤其是 executive_summary / core_events / local_news / peripheral_intelligence / actionable_ideas
-"""
-
-    repair_user_prompt = f"""请把下面这段不合法的 JSON 修复成合法 JSON，只输出 JSON：
-
-```text
-{raw_text}
-```"""
-
-    repaired = generate_with_llm(
-        repair_system_prompt,
-        repair_user_prompt,
-        emails=None,
-        response_format={"type": "json_object"},
+    return app_report_payload.repair_report_payload_json(
+        raw_text,
+        save_malformed_json_snapshot_fn=save_malformed_json_snapshot,
+        generate_with_llm_fn=generate_with_llm,
+        load_json_dict_with_fallbacks_fn=load_json_dict_with_fallbacks,
+        logger=logger,
     )
-    payload = load_json_dict_with_fallbacks(repaired)
-    logger.info("✅ 模型返回的损坏 JSON 已通过修复流程恢复")
-    return payload
 
 
 def parse_batch_summary_json(text: str) -> Dict:
     """解析子批次结构化摘要，失败时直接抛错让上层重试/切换。"""
-    payload = load_json_dict_with_fallbacks(text)
-    topics = payload.get("topics")
-    if not isinstance(topics, list):
-        raise ValueError("topics missing from batch summary")
-
-    normalized_topics = []
-    for topic in topics:
-        if not isinstance(topic, dict):
-            continue
-        normalized_topics.append({
-            "title": topic.get("title", ""),
-            "email_ids": topic.get("email_ids", []),
-            "coverage_count": topic.get("coverage_count", 0),
-            "merge_key": topic.get("merge_key", ""),
-            "time_horizon": topic.get("time_horizon", ""),
-            "target_slot": topic.get("target_slot", ""),
-            "fact_subject": topic.get("fact_subject", ""),
-            "opinion_subject": topic.get("opinion_subject", ""),
-            "info_type": topic.get("info_type", ""),
-            "core_facts": topic.get("core_facts", []),
-            "market_takeaways": topic.get("market_takeaways", []),
-            "tickers": topic.get("tickers", []),
-            "source_evidence": topic.get("source_evidence", []),
-        })
-
-    payload["topics"] = normalized_topics
-    return payload
+    return app_report_pipeline.parse_batch_summary_json(
+        text,
+        load_json_dict_with_fallbacks_fn=load_json_dict_with_fallbacks,
+    )
 
 
 def normalize_string_list(items: Any, limit: int = 6) -> List[str]:
-    """把模型返回的数组字段规整成去重、去空的字符串列表。"""
-    if isinstance(items, str):
-        items = [items]
-    if not isinstance(items, list):
-        return []
-
-    result = []
-    seen = set()
-    for item in items:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(text)
-        if len(result) >= limit:
-            break
-    return result
+    return app_report_payload.normalize_string_list(items, limit=limit)
 
 
 def escape_with_highlights(text: str, highlights: Optional[List[str]] = None) -> str:
-    """先做 HTML 转义，再把结构化 highlight 短语渲染成统一样式。"""
-    escaped_text = escape(str(text or ""))
-    phrases = normalize_string_list(highlights or [], limit=8)
-    if not phrases:
-        return escaped_text
-
-    placeholders = {}
-    replaced_text = escaped_text
-    for idx, phrase in enumerate(sorted(phrases, key=len, reverse=True), 1):
-        escaped_phrase = escape(phrase)
-        token = f"__HIGHLIGHT_{idx}__"
-        if escaped_phrase and escaped_phrase in replaced_text:
-            replaced_text = replaced_text.replace(
-                escaped_phrase,
-                token,
-            )
-            placeholders[token] = f'<span class="highlight">{escaped_phrase}</span>'
-
-    for token, html in placeholders.items():
-        replaced_text = replaced_text.replace(token, html)
-    return replaced_text
+    return app_report_renderer.escape_with_highlights(text, highlights)
 
 
 def derive_highlight_phrases(text: str, limit: int = 4) -> List[str]:
-    """当模型没有稳定返回 highlight 时，用判断性短语补一层重点高亮。"""
-    raw = str(text or "").strip()
-    if not raw:
-        return []
-
-    candidates = []
-
-    patterns = [
-        r'["“](.{2,40}?)["”]',
-        r"(危机公关/注意力转移|生死存亡级冲突|估值折扣创造entry point|唯一全栈AI玩家|硬件护城河变薄|系统性流动性收缩|效率差距扩大是结构性问题)",
-        r"([\u4e00-\u9fffA-Za-z0-9/+\-]{4,28}(?:受益者|创造entry point|护城河变薄|全栈AI玩家|流动性收缩|结构性问题|危机公关|注意力转移|冲突|折扣|错杀机会|战略转向|重新定价|趋势|逻辑))",
-    ]
-    for pattern in patterns:
-        candidates.extend(re.findall(pattern, raw))
-
-    normalized = []
-    seen = set()
-    for candidate in candidates:
-        phrase = str(candidate).strip(" \"“”'()[]")
-        if len(phrase) < 2 or len(phrase) > 40:
-            continue
-        lowered = phrase.lower()
-        if lowered in {"ai", "et", "pm", "am"}:
-            continue
-        if re.fullmatch(r"[$]?[0-9]+(?:\.[0-9]+)?(?:%|bps|x|亿|万|bn|b|m)?", lowered):
-            continue
-        if re.fullmatch(r"[A-Z]{2,5}", phrase):
-            continue
-        if re.fullmatch(r"[A-Z0-9/+\- ]{2,20}", phrase):
-            continue
-        if not re.search(r"[\u4e00-\u9fff]", phrase):
-            continue
-        if not re.search(r"(危机|冲突|受益者|折扣|机会|护城河|全栈|流动性|结构性|逻辑|趋势|转向|重估|错杀|信号|判断|定位|催化)", phrase):
-            continue
-        key = phrase.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(phrase)
-        if len(normalized) >= limit:
-            break
-    return normalized
+    return app_report_payload.derive_highlight_phrases(text, limit=limit)
 
 
 def derive_stance_highlight_phrases(text: str, limit: int = 2) -> List[str]:
-    """只为市场观点里的 stance 提取“特别鲜明”的立场短语。"""
-    raw = str(text or "").strip()
-    if not raw:
-        return []
-
-    strong_markers = (
-        "强烈看多",
-        "强烈看空",
-        "明确看多",
-        "明确看空",
-        "坚定看多",
-        "坚定看空",
-        "极度乐观",
-        "极度悲观",
-        "显著转向",
-        "明显转向",
-        "大幅上修",
-        "大幅下修",
-        "强烈推荐",
-        "明确转向",
-        "超配",
-        "低配",
-        "overweight",
-        "underweight",
-        "strong buy",
-        "strong sell",
-        "bullish",
-        "bearish",
-    )
-
-    results = []
-    lowered = raw.lower()
-    for marker in strong_markers:
-        if marker.lower() in lowered:
-            results.append(marker if re.search(r"[\u4e00-\u9fff]", marker) else raw)
-            break
-
-    if not results:
-        return []
-
-    return normalize_string_list(results, limit=limit)
+    return app_report_payload.derive_stance_highlight_phrases(text, limit=limit)
 
 
 def merge_highlight_phrases(*sources: Any, limit: int = 6) -> List[str]:
-    """优先使用模型给的高亮短语，不足时再用规则补齐。"""
-    result = []
-    seen = set()
-    for source in sources:
-        for item in normalize_string_list(source, limit=limit):
-            key = item.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(item)
-            if len(result) >= limit:
-                return result
-    return result
+    return app_report_payload.merge_highlight_phrases(*sources, limit=limit)
 
 
 def coerce_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
+    return app_report_payload.coerce_int(value, default=default)
 
 
 def coerce_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return default
+    return app_report_payload.coerce_float(value, default=default)
 
 
 def build_priority_sort_key(item: Dict[str, Any]) -> tuple:
-    """统一的优先级排序键：先按覆盖度，再按全局分数，最后才参考模型显式 rank。"""
-    # TODO(coverage-first): 当前默认更信任“被多少封邮件反复提到”的客观共识，
-    # 因此排序优先级是 coverage_count -> global_score -> priority_rank。
-    # 后续若完成更系统的人工标注 / 模型评测，并且允许分析师配置关注板块，
-    # 可重新评估是否让 Executive Summary / Key Coverage 对主观 priority_rank 或偏好权重更敏感。
-    raw_rank = item.get("priority_rank")
-    rank = coerce_int(raw_rank, 9999 if raw_rank in (None, "") else 9999)
-    coverage = coerce_int(item.get("coverage_count"), 0)
-    score = coerce_float(item.get("global_score"), 0.0)
-    return (-coverage, -score, rank)
+    return app_report_payload.build_priority_sort_key(item)
 
 
 def sort_by_priority(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return sorted(items, key=build_priority_sort_key)
+    return app_report_payload.sort_by_priority(items)
 
 
 def derive_executive_key_signals(
@@ -1442,80 +871,21 @@ def derive_executive_key_signals(
     model_key_signals: Any,
     limit: int = 5,
 ) -> List[str]:
-    """Executive Summary 的关键信号以 Key Coverage 为主，再少量吸收特别强的边缘/跨市场信号。"""
-
-    def add_signal(result: List[str], seen: set, text: str) -> None:
-        text = str(text or "").strip()
-        if not text:
-            return
-        key = re.sub(r"\s+", " ", text).strip().lower()
-        if not key or key in seen:
-            return
-        seen.add(key)
-        result.append(text)
-
-    def is_standout(item: Dict[str, Any]) -> bool:
-        coverage = coerce_int(item.get("coverage_count"), 0)
-        score = coerce_float(item.get("global_score"), 0.0)
-        rank = coerce_int(item.get("priority_rank"), 9999)
-        return coverage >= 2 or score >= 8.0 or rank == 1
-
-    results: List[str] = []
-    seen = set()
-
-    for item in normalized_coverage:
-        if len(results) >= limit:
-            break
-        add_signal(results, seen, item.get("headline"))
-
-    for item in normalized_local_news:
-        if len(results) >= limit:
-            break
-        if is_standout(item):
-            add_signal(results, seen, item.get("headline") or item.get("signal"))
-
-    for item in normalized_cross_market_signals:
-        if len(results) >= limit:
-            break
-        if is_standout(item):
-            add_signal(results, seen, item.get("headline"))
-
-    for item in normalize_string_list(model_key_signals, limit=limit):
-        if len(results) >= limit:
-            break
-        add_signal(results, seen, item)
-
-    return results[:limit]
+    return app_report_payload.derive_executive_key_signals(
+        normalized_coverage,
+        normalized_local_news,
+        normalized_cross_market_signals,
+        model_key_signals,
+        limit=limit,
+    )
 
 
 def normalize_core_event_link_refs(value: Any, limit: int = 5) -> List[str]:
-    refs = normalize_string_list(value, limit=limit)
-    normalized = []
-    seen = set()
-    for ref in refs:
-        ref = ref.strip()
-        if not ref:
-            continue
-        key = ref.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(ref)
-    return normalized
+    return app_report_payload.normalize_core_event_link_refs(value, limit=limit)
 
 
 def build_core_event_lookup(core_events: List[Dict[str, Any]]) -> Dict[str, str]:
-    lookup: Dict[str, str] = {}
-    for item in core_events:
-        core_event_id = item.get("core_event_id")
-        if not core_event_id:
-            continue
-        lookup[str(core_event_id).strip().lower()] = core_event_id
-        for candidate in [item.get("headline"), *(item.get("source_topics") or [])]:
-            if not candidate:
-                continue
-            lookup[str(candidate).strip().lower()] = core_event_id
-    return lookup
+    return app_report_payload.build_core_event_lookup(core_events)
 
 
 def resolve_linked_core_event_ids(
@@ -1524,897 +894,168 @@ def resolve_linked_core_event_ids(
     core_event_lookup: Dict[str, str],
     limit: int = 5,
 ) -> List[str]:
-    linked_ids = []
-    seen = set()
-    for ref in [*normalize_core_event_link_refs(explicit_refs, limit=limit), *normalize_string_list(source_topics, limit=limit)]:
-        key = str(ref).strip().lower()
-        if not key:
-            continue
-        mapped = core_event_lookup.get(key)
-        if not mapped:
-            continue
-        if mapped in seen:
-            continue
-        seen.add(mapped)
-        linked_ids.append(mapped)
-        if len(linked_ids) >= limit:
-            break
-    return linked_ids
+    return app_report_payload.resolve_linked_core_event_ids(
+        explicit_refs,
+        source_topics,
+        core_event_lookup,
+        limit=limit,
+    )
 
 
 def normalize_actionable_dedupe_key(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+    return app_report_payload.normalize_actionable_dedupe_key(text)
 
 
 def dedupe_actionable_items(
     items: List[Dict[str, Any]],
     existing_keys: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
-    deduped = []
-    seen = set(existing_keys or set())
-    for item in items:
-        key = normalize_actionable_dedupe_key(item.get("idea", ""))
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(item)
-    return deduped
+    return app_report_payload.dedupe_actionable_items(items, existing_keys=existing_keys)
 
 
 def normalize_actionable_item(item: Any, fallback_text_key: str = "idea") -> Optional[Dict[str, Any]]:
-    if isinstance(item, str):
-        text = item.strip()
-        if not text:
-            return None
-        return {
-            "idea": text,
-            "priority_rank": 9999,
-            "coverage_count": 0,
-            "global_score": 0.0,
-            "source_topics": [],
-            "linked_core_event_refs": [],
-        }
-
-    if not isinstance(item, dict):
-        return None
-
-    text = str(
-        item.get("idea")
-        or item.get("text")
-        or item.get("title")
-        or item.get(fallback_text_key)
-        or ""
-    ).strip()
-    if not text:
-        return None
-
-    return {
-        "idea": text,
-        "priority_rank": coerce_int(item.get("priority_rank"), 9999),
-        "coverage_count": coerce_int(item.get("coverage_count"), 0),
-        "global_score": coerce_float(item.get("global_score"), 0.0),
-        "source_topics": normalize_string_list(item.get("source_topics"), limit=5),
-        "linked_core_event_refs": normalize_core_event_link_refs(
-            item.get("linked_core_event_headlines") or item.get("linked_core_event_ids"),
-            limit=5,
-        ),
-    }
+    return app_report_payload.normalize_actionable_item(item, fallback_text_key=fallback_text_key)
 
 
 def normalize_report_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """把最终晨报 JSON 规整到固定模板槽位。"""
-    executive = payload.get("executive_summary") or payload.get("summary") or {}
-    if not isinstance(executive, dict):
-        executive = {}
-
-    coverage_items = (
-        payload.get("core_events")
-        or payload.get("key_coverage")
-        or payload.get("coverage")
-        or payload.get("topics")
-        or []
-    )
-    if not isinstance(coverage_items, list):
-        coverage_items = []
-
-    normalized_coverage = []
-    for item in coverage_items:
-        if not isinstance(item, dict):
-            continue
-
-        headline = str(
-            item.get("headline")
-            or item.get("title")
-            or item.get("topic")
-            or ""
-        ).strip()
-        if not headline:
-            continue
-
-        core_facts = normalize_string_list(item.get("core_facts") or item.get("facts"), limit=4)
-        action_text = str(item.get("action") or item.get("investment_takeaway") or item.get("investment_implication") or "").strip()
-        item_highlights = item.get("highlight_phrases") or item.get("highlights")
-
-        normalized_coverage.append({
-            "headline": headline,
-            "priority_rank": coerce_int(item.get("priority_rank"), 9999),
-            "coverage_count": coerce_int(item.get("coverage_count"), 0),
-            "global_score": coerce_float(item.get("global_score"), 0.0),
-            "source_topics": normalize_string_list(item.get("source_topics") or item.get("email_ids"), limit=8),
-            "core_facts": core_facts,
-            "market_views": [
-                {
-                    "source": str(row.get("source") or row.get("观点来源") or "").strip(),
-                    "stance": str(row.get("stance") or row.get("立场") or "").strip(),
-                    "thesis": str(row.get("thesis") or row.get("core_argument") or row.get("核心论点") or "").strip(),
-                    "stance_highlight_phrases": merge_highlight_phrases(
-                        row.get("stance_highlight_phrases"),
-                        derive_stance_highlight_phrases(row.get("stance") or row.get("立场") or ""),
-                        limit=2,
-                    ),
-                    "thesis_highlight_phrases": merge_highlight_phrases(
-                        row.get("thesis_highlight_phrases"),
-                        row.get("highlight_phrases") or row.get("highlights"),
-                        derive_highlight_phrases(row.get("thesis") or row.get("core_argument") or row.get("核心论点") or ""),
-                        limit=4,
-                    ),
-                }
-                for row in (item.get("market_views") or item.get("view_table") or [])
-                if isinstance(row, dict)
-                and (
-                    str(row.get("source") or row.get("观点来源") or "").strip()
-                    or str(row.get("stance") or row.get("立场") or "").strip()
-                    or str(row.get("thesis") or row.get("core_argument") or row.get("核心论点") or "").strip()
-                )
-            ],
-            "market_take": normalize_string_list(item.get("market_take") or item.get("market_takeaways"), limit=4),
-            "importance": str(item.get("importance") or item.get("why_it_matters") or "").strip(),
-            "action": action_text,
-            "core_fact_highlight_phrases": merge_highlight_phrases(
-                item.get("core_fact_highlight_phrases"),
-                derive_highlight_phrases(" ".join(core_facts), limit=4),
-                limit=4,
-            ),
-            "action_highlight_phrases": merge_highlight_phrases(
-                item.get("action_highlight_phrases"),
-                item_highlights,
-                derive_highlight_phrases(headline, limit=2),
-                derive_highlight_phrases(action_text, limit=3),
-                limit=6,
-            ),
-            "highlight_phrases": merge_highlight_phrases(
-                item_highlights,
-                derive_highlight_phrases(headline, limit=2),
-                derive_highlight_phrases(action_text, limit=3),
-                limit=6,
-            ),
-            "attribution_note": str(item.get("attribution_note") or item.get("source_note") or "").strip(),
-            "source_evidence": normalize_string_list(item.get("source_evidence"), limit=3),
-        })
-
-    normalized_coverage = sort_by_priority(normalized_coverage)[:6]
-    for index, item in enumerate(normalized_coverage, 1):
-        item["core_event_id"] = f"core_event_{index}"
-
-    core_event_lookup = build_core_event_lookup(normalized_coverage)
-
-    local_news = payload.get("local_news") or []
-    if not isinstance(local_news, list):
-        local_news = []
-    normalized_local_news = []
-    for item in local_news:
-        if not isinstance(item, dict):
-            continue
-        headline = str(item.get("headline") or item.get("title") or "").strip()
-        if not headline:
-            continue
-        signal_text = str(item.get("signal") or "").strip()
-        importance_text = str(item.get("importance") or item.get("why_it_matters") or "").strip()
-        action_text = str(item.get("action") or "").strip()
-        item_highlights = item.get("highlight_phrases") or item.get("highlights")
-        normalized_local_news.append({
-            "headline": headline,
-            "priority_rank": coerce_int(item.get("priority_rank"), 9999),
-            "coverage_count": coerce_int(item.get("coverage_count"), 0),
-            "global_score": coerce_float(item.get("global_score"), 0.0),
-            "signal": signal_text,
-            "importance": importance_text,
-            "action": action_text,
-            "signal_highlight_phrases": merge_highlight_phrases(
-                item.get("signal_highlight_phrases"),
-                derive_highlight_phrases(signal_text, limit=3),
-                limit=4,
-            ),
-            "importance_highlight_phrases": merge_highlight_phrases(
-                item.get("importance_highlight_phrases"),
-                derive_highlight_phrases(importance_text, limit=3),
-                limit=4,
-            ),
-            "action_highlight_phrases": merge_highlight_phrases(
-                item.get("action_highlight_phrases"),
-                item_highlights,
-                derive_highlight_phrases(action_text, limit=3),
-                limit=4,
-            ),
-            "highlight_phrases": merge_highlight_phrases(
-                item_highlights,
-                derive_highlight_phrases(headline, limit=2),
-                derive_highlight_phrases(signal_text, limit=3),
-                derive_highlight_phrases(action_text, limit=3),
-                limit=5,
-            ),
-        })
-
-    # Local News 保留模型输出顺序。这里不做本地排序，避免打乱模型对边缘信号的编排语义。
-    normalized_local_news = normalized_local_news[:6]
-
-    peripheral = payload.get("peripheral_intelligence") or {}
-    if not isinstance(peripheral, dict):
-        peripheral = {}
-
-    mapped_events = peripheral.get("mapped_events") or payload.get("mapped_events") or []
-    if not isinstance(mapped_events, list):
-        mapped_events = []
-    normalized_mapped_events = []
-    for item in mapped_events:
-        if not isinstance(item, dict):
-            continue
-        event = str(item.get("event") or item.get("外围事件") or "").strip()
-        related = str(item.get("related_company") or item.get("相关公司") or "").strip()
-        mapping = str(item.get("mapping") or item.get("对Key Coverage的映射") or "").strip()
-        if not (event or related or mapping):
-            continue
-        normalized_mapped_events.append({
-            "event": event,
-            "related_company": related,
-            "mapping": mapping,
-        })
-
-    cross_market_signals = peripheral.get("cross_market_signals") or payload.get("cross_market_signals") or []
-    if not isinstance(cross_market_signals, list):
-        cross_market_signals = []
-    normalized_cross_market_signals = []
-    for item in cross_market_signals:
-        if not isinstance(item, dict):
-            continue
-        headline = str(item.get("headline") or item.get("title") or "").strip()
-        bullets = normalize_string_list(item.get("bullets") or item.get("signals") or item.get("insights"), limit=4)
-        if not headline and not bullets:
-            continue
-        normalized_cross_market_signals.append({
-            "headline": headline,
-            "priority_rank": coerce_int(item.get("priority_rank"), 9999),
-            "coverage_count": coerce_int(item.get("coverage_count"), 0),
-            "global_score": coerce_float(item.get("global_score"), 0.0),
-            "bullets": bullets,
-            "bullet_highlight_phrases": merge_highlight_phrases(
-                item.get("bullet_highlight_phrases"),
-                item.get("highlight_phrases") or item.get("highlights"),
-                derive_highlight_phrases(" ".join(bullets), limit=4),
-                limit=5,
-            ),
-        })
-
-    # Peripheral / cross_market_signals 同样保留模型输出顺序，不做本地重排。
-    normalized_cross_market_signals = normalized_cross_market_signals[:5]
-
-    actionable = payload.get("actionable_ideas") or {}
-    if not isinstance(actionable, dict):
-        actionable = {}
-
-    catalysts = actionable.get("catalysts") or payload.get("catalysts_to_watch") or payload.get("catalysts") or []
-    if isinstance(catalysts, dict):
-        catalysts = catalysts.get("items") or []
-    if not isinstance(catalysts, list):
-        catalysts = []
-    normalized_catalysts = []
-    for item in catalysts:
-        if not isinstance(item, dict):
-            continue
-        catalyst = str(item.get("catalyst") or item.get("title") or "").strip()
-        timing = str(item.get("time") or item.get("timing") or "").strip()
-        impact = str(item.get("impact") or item.get("impact_assets") or item.get("affected_assets") or "").strip()
-        if not (catalyst or timing or impact):
-            continue
-        normalized_catalysts.append({
-            "catalyst": catalyst,
-            "time": timing,
-            "impact": impact,
-            "priority_rank": coerce_int(item.get("priority_rank"), 9999),
-            "coverage_count": coerce_int(item.get("coverage_count"), 0),
-            "global_score": coerce_float(item.get("global_score"), 0.0),
-            "source_topics": normalize_string_list(item.get("source_topics"), limit=5),
-            "linked_core_event_refs": normalize_core_event_link_refs(
-                item.get("linked_core_event_headlines") or item.get("linked_core_event_ids"),
-                limit=5,
-            ),
-        })
-
-    normalized_catalysts = sort_by_priority(normalized_catalysts)[:8]
-    for item in normalized_catalysts:
-        item["linked_core_event_ids"] = resolve_linked_core_event_ids(
-            item.pop("linked_core_event_refs", []),
-            item.get("source_topics"),
-            core_event_lookup,
-        )
-
-    short_term_raw = actionable.get("short_term") or actionable.get("near_term") or []
-    medium_term_raw = actionable.get("medium_term") or actionable.get("mid_term") or []
-    if not short_term_raw:
-        short_term_raw = (payload.get("catalysts_to_watch") or {}).get("short_term") or []
-    if not medium_term_raw:
-        medium_term_raw = (payload.get("catalysts_to_watch") or {}).get("medium_term") or []
-
-    normalized_short_term = []
-    if isinstance(short_term_raw, list):
-        for item in short_term_raw:
-            normalized_item = normalize_actionable_item(item)
-            if normalized_item:
-                normalized_short_term.append(normalized_item)
-    normalized_short_term = dedupe_actionable_items(sort_by_priority(normalized_short_term))[:5]
-    for item in normalized_short_term:
-        item["linked_core_event_ids"] = resolve_linked_core_event_ids(
-            item.pop("linked_core_event_refs", []),
-            item.get("source_topics"),
-            core_event_lookup,
-        )
-
-    normalized_medium_term = []
-    if isinstance(medium_term_raw, list):
-        for item in medium_term_raw:
-            normalized_item = normalize_actionable_item(item)
-            if normalized_item:
-                normalized_medium_term.append(normalized_item)
-    normalized_medium_term = dedupe_actionable_items(
-        sort_by_priority(normalized_medium_term),
-        existing_keys={normalize_actionable_dedupe_key(item.get("idea", "")) for item in normalized_short_term},
-    )[:5]
-    for item in normalized_medium_term:
-        item["linked_core_event_ids"] = resolve_linked_core_event_ids(
-            item.pop("linked_core_event_refs", []),
-            item.get("source_topics"),
-            core_event_lookup,
-        )
-
-    market_background_items = normalize_string_list(
-        executive.get("market_background") or executive.get("background"),
-        limit=4,
-    )
-    derived_key_signals = derive_executive_key_signals(
-        normalized_coverage,
-        normalized_local_news,
-        normalized_cross_market_signals,
-        executive.get("key_signals") or executive.get("signals"),
-        limit=5,
-    )
-
-    normalized = {
-        "executive_summary": {
-            "market_background": "；".join(market_background_items),
-            "key_signals": derived_key_signals,
-        },
-        "core_events": normalized_coverage,
-        "local_news": normalized_local_news,
-        "peripheral_intelligence": {
-            "mapped_events": normalized_mapped_events,
-            "cross_market_signals": normalized_cross_market_signals,
-        },
-        "actionable_ideas": {
-            "short_term": normalized_short_term,
-            "medium_term": normalized_medium_term,
-            "catalysts": normalized_catalysts,
-            "bottom_line": str(actionable.get("bottom_line") or payload.get("bottom_line") or "").strip(),
-        },
-    }
-
-    # TODO(analyst-preferences): Executive Summary 的关键信号目前仍主要依赖模型给出的顺序。
-    # 如果后续引入“分析师关注板块 / watchlist”配置，应优先只作用于 Executive Summary 和 Key Coverage，
-    # 不要影响 Local News / Peripheral / Actionable 的默认客观排序。
-
-    if not normalized["executive_summary"]["market_background"]:
-        normalized["executive_summary"]["market_background"] = "当日邮件的共同背景尚不充分，建议结合盘前行情一并解读。"
-    if not normalized["executive_summary"]["key_signals"]:
-        normalized["executive_summary"]["key_signals"] = ["暂无足够强的共识信号，需结合后续白名单邮件继续观察。"]
-    if not normalized["local_news"]:
-        normalized["local_news"] = [{
-            "headline": "暂无额外边缘信号",
-            "signal": "目前白名单邮件中的高价值信息主要集中在核心事件。",
-            "importance": "避免为了填充版面而加入低质量噪音。",
-            "action": "后续如有补充邮件，再更新边缘信号。",
-        }]
-    if not normalized["actionable_ideas"]["short_term"]:
-        normalized["actionable_ideas"]["short_term"] = [normalize_actionable_item("关注盘前新增邮件、管理层发言和数据披露是否改变当前判断。")]
-    if not normalized["actionable_ideas"]["medium_term"]:
-        normalized["actionable_ideas"]["medium_term"] = [normalize_actionable_item("关注未来 1-4 周内产业链验证、财报与产品节点带来的再定价机会。")]
-    if not normalized["actionable_ideas"]["catalysts"]:
-        normalized["actionable_ideas"]["catalysts"] = [{
-            "catalyst": "后续白名单邮件验证",
-            "time": "",
-            "impact": "相关主题与标的",
-        }]
-    if not normalized["actionable_ideas"]["bottom_line"]:
-        normalized["actionable_ideas"]["bottom_line"] = "市场仍处于信息快速演化阶段，建议优先跟踪共识最强、验证路径最清晰的主题。"
-
-    return normalized
+    return app_report_payload.normalize_report_payload(payload)
 
 
 def parse_report_payload_json(text: str) -> Dict[str, Any]:
     """解析最终晨报 JSON，并做字段归一化。"""
-    try:
-        payload = load_json_dict_with_fallbacks(text)
-    except Exception:
-        logger.warning("⚠️ 最终晨报 JSON 解析失败，尝试修复")
-        payload = repair_report_payload_json(text)
-    return normalize_report_payload(payload)
+    return app_report_payload.parse_report_payload_json(
+        text,
+        load_json_dict_with_fallbacks_fn=load_json_dict_with_fallbacks,
+        repair_report_payload_json_fn=repair_report_payload_json,
+        normalize_report_payload_fn=normalize_report_payload,
+        logger=logger,
+    )
 
 
 def build_prompt_category_block(title: str, items: List[str]) -> str:
-    lines = [f"## {title}"]
-    for idx, item in enumerate(items, 1):
-        lines.append(f"{idx}. {item}")
-    return "\n".join(lines)
+    return app_llm_prompts.build_prompt_category_block(title, items)
 
 
 def get_report_prompt_governance() -> str:
-    principles = [
-        "优先做内容筛选和语义归因，再做摘要表达。",
-        "结构稳定优先于文采，宁可朴素也不要漂移。",
-        "图片、正文、附件文本需要在同一判断框架下联合理解。",
-    ]
-    bottom_lines = [
-        "不能把外部引述、媒体报道、市场传闻误写成发件机构 house view。",
-        "不能把普通功能小升级、版本小更新、一般性运营通知硬塞进核心版面。",
-        "不能把观点判断、推测或带 says / suggests / reportedly 色彩的内容直接写成核心事实。",
-        "不能为了显得完整而重复同一个逻辑，不能把一句话能说清的内容扩成一段。",
-    ]
-    reminders = [
-        "核心事实每条尽量一句话；能短就不要写成长句。",
-        "关键信号、投资启示、Bottom Line 都优先写成短句，避免背景解释和同义反复。",
-        "来源展示优先使用正文和主题里可识别的真实机构标签，如 MS、JPM。",
-        "版式由本地固定模板渲染，模型只需要把内容填进正确槽位。",
-    ]
-    return "\n\n".join(
-        [
-            build_prompt_category_block("原则", principles),
-            build_prompt_category_block("底线", bottom_lines),
-            build_prompt_category_block("提醒", reminders),
-        ]
-    )
+    return app_llm_prompts.get_report_prompt_governance()
 
 
 def get_hf_role_guidance() -> str:
-    identity = [
-        "你是一位每天会收到非常多邮件的对冲基金高级研究员，需要在每天盘前高效阅读卖方 sales 发来的内容。",
-        "你的输入是已经筛选进系统的高价值卖方邮件、图表、传闻和渠道信息。",
-        "你的职责不是机械复述邮件，而是帮助你自己快速看清：今天最集中的关注点、市场对这些主题的主流态度和 thesis、以及哪些信息最可能影响预期修正和交易决策。",
-    ]
-    editorial_style = [
-        "你已经知道大部分基础事实，你的价值在于提炼主线、统一归因、压缩噪音，并把最值得进入晨会讨论的内容放到最前面。",
-        "在做盘前邮件信息总结时，首页先给市场背景，再给关键信号，让人快速抓住关键点。",
-        "市场背景优先写宏观或者行业层面的主线，或者近期的重点事件。",
-        "核心区优先保留共识最强、可交易性最强、最可能影响预期修正的主题。",
-        "句子尽量短，解释尽量少；一句话能讲清，就不要拆成三句。",
-        "非常重要的内容需要高亮。",
-    ]
-    judgment_style = [
-        "对谁真正提出观点保持高度敏感；发件机构不自动拥有正文里的所有观点，外部人物、媒体、管理层、市场传闻必须保留真实主语。",
-        "默认先看哪些主题被重复提到、哪些判断正在形成共识，再决定排序和首页信号。",
-        "不要为了填版面硬塞 trivial 更新、普通功能升级或没有交易含义的边角信息。",
-        "不要把 Actionable Ideas 写成待办清单；它更像你会放进晨会和盘前讨论里的交易想法与催化清单。",
-        "Actionable Ideas 要短、狠、可执行；优先保留最核心的对象、逻辑和催化，不要写成解释型小作文。",
-        "Local News 不是次要垃圾桶，而是捕捉暂时不属于核心覆盖、但可能预示预期变化或相对收益机会的边缘信号。",
-        "Peripheral Intelligence 需要把非核心公司事件、跨市场变化和外围信息映射回当前最重要的投资主线。",
-    ]
-    return "\n\n".join(
-        [
-            build_prompt_category_block("角色", identity),
-            build_prompt_category_block("写法", editorial_style),
-            build_prompt_category_block("判断", judgment_style),
-        ]
-    )
+    return app_llm_prompts.get_hf_role_guidance()
 
 
 def get_shared_fact_attribution_rules() -> str:
-    return """## 事实与归因规则
-- 先区分事实、观点、传闻，再做摘要
-- 主语归因优先于表面语气词
-- “发件人/券商机构”不等于“正文里每一句话的观点主体”
-- 如果正文出现 `X says`、`according to X`、`reports suggest`、`媒体称`、`市场传闻`、`management said` 之类表述，必须把观点归给 X、媒体、市场或管理层，而不是默认归给发件机构
-- 带有“认为 / 预计 / 可能 / 或 / suggests / reportedly / rumor”色彩的内容，默认不是核心事实，除非邮件里给出了可验证的客观证据
-- 例如 `Shawn Kim says SRAM is a complement to HBM` 应写成 `Shawn Kim 认为...` 或 `邮件转述 Shawn Kim 的观点...`，不能写成 `MS认为...`，除非原文明确写的是 Morgan Stanley 的判断
-"""
+    return app_llm_prompts.get_shared_fact_attribution_rules()
 
 
 def get_report_output_contract() -> str:
-    return """## 输出契约
-- 只输出合法 JSON，不要 HTML，不要 Markdown，不要解释文字
-- 必须使用简体中文；ticker、公司英文名和必要英文缩写可保留原文
-- 无内容时：数组返回 `[]`，字符串返回 `\"\"`；不要返回 `null`、`None`、`N/A`、`未知`、`待定`
-- 不得新增 schema 未定义字段、额外顶层模块或说明性文字
-- 不得补写邮件中未出现、也无法从输入直接推出的机构观点、时间点、催化、数字、引述对象
-- 如果信息不足，宁可留空、降级或省略该条，也不要为了显得完整而硬写
-"""
+    return app_llm_prompts.get_report_output_contract()
 
 
 def get_report_slot_boundary_rules() -> str:
-    return """## 槽位边界
-- `executive_summary` 只负责市场大背景和当日最重要信号，不承担细节堆砌
-- `core_events` 只放最高优先级、最可能影响预期修正或交易决策的核心主题；同一主题应围绕同一个主要对象、事件/催化和预期变化
-- `local_news` 放没有进入核心区、但仍可能预示预期变化、情绪变化或相对收益机会的边缘信号；不要重复 `core_events`，也不要收留 trivial 噪音
-- `peripheral_intelligence` 只放能够映射回当前核心主线的外围事件、跨市场变化和类比信号；如果不能清楚映射，就不要硬写
-- `actionable_ideas` 是基于全局信息重新提炼出的交易想法与催化剂，不是剩余信息区，也不是对事实的机械改写
-"""
+    return app_llm_prompts.get_report_slot_boundary_rules()
 
 
 def build_report_system_prompt(*extra_sections: str) -> str:
-    sections = [
-        "你是一位每天会收到非常多邮件的对冲基金高级研究员，需要在每天盘前高效阅读卖方 sales 发来的内容。",
-        get_hf_role_guidance(),
-        get_report_prompt_governance(),
-        get_shared_fact_attribution_rules(),
-        get_report_output_contract(),
-        get_report_slot_boundary_rules(),
-        *extra_sections,
-    ]
-    return "\n\n".join(section.strip() for section in sections if section and section.strip())
+    return app_llm_prompts.build_report_system_prompt(*extra_sections)
+
+
+def get_batch_prompt_shared_brief() -> str:
+    return app_llm_prompts.get_batch_prompt_shared_brief()
+
+
+def get_merge_prompt_shared_brief() -> str:
+    return app_llm_prompts.get_merge_prompt_shared_brief()
+
+
+def build_batch_system_prompt(*extra_sections: str) -> str:
+    return app_llm_prompts.build_batch_system_prompt(*extra_sections)
+
+
+def build_merge_system_prompt(*extra_sections: str) -> str:
+    return app_llm_prompts.build_merge_system_prompt(*extra_sections)
 
 
 def get_batch_summary_stage_rules() -> str:
-    return """## 子批次压缩纪律
-- 当前任务不是直接写最终晨报，而是为后续合并提供稳定、可对齐、可归槽的中间摘要
-- 同一对象如果对应不同催化、不同时间框架或不同预期修正方向，不要合并成一个 topic
-- 实质相同的主题在同一批次内尽量使用稳定标题，避免同义改写造成后续 merge 漂移
-- 如果你不确定两个点是否属于同一主题，优先分开写，并保留各自证据
-- 每个 topic 都要预判它最终更可能进入哪个槽位，并写入 `target_slot`
-- 每个 topic 都要写 `time_horizon`，帮助后续区分短期交易驱动和中期主线
-- 内容要极度精炼，只保留后续合并、排序和归槽真正需要的信息
-"""
+    return app_llm_prompts.get_batch_summary_stage_rules()
 
 
 def get_merge_stage_rules(total_email_count: int) -> str:
-    return f"""## 合并任务
-你会收到若干份子批次摘要，这些摘要来自同一天的同一组 {total_email_count} 封卖方邮件。请完成以下工作：
-1. 只在“同一主要对象 + 同一底层事件/催化 + 同一主要预期方向 + 同一时间框架”成立时才合并主题
-2. 如果是同一公司但对应不同催化、不同时间框架或不同价格驱动，必须拆成不同主题，不要硬并
-3. 如果基础事实相同但市场观点有分歧，可以放在同一个 `core_events` 下用多条 `market_views` 保留分歧；不要伪造一致共识
-4. 合并时把 batch 里的 `target_slot`、`time_horizon`、`merge_key` 当作对齐提示，但不要机械照搬；若提示和证据冲突，以事实归因与原文证据为准
-5. 按合并后的覆盖邮件数排序，但不要在输出中显示覆盖数字
-6. 普通功能升级、一般性产品更新、没有交易含义的 trivial 变化默认忽略或显著降权
-7. Executive Summary 必须明确拆成“市场大背景”和“关键信号”
-8. Actionable Ideas 必须基于合并后的全局图景二次提炼，不能只是复制批次 topic 标题
-9. 核心事实要尽量短，不要写成长段解释
-"""
+    return app_llm_prompts.get_merge_stage_rules(total_email_count)
 
 
 def get_fixed_report_schema_prompt() -> str:
-    return f"""## 固定模板槽位
-你必须输出合法 JSON，字段结构如下：
-{{
-  "executive_summary": {{
-    "market_background": "1段，概括市场大背景，优先1-2句",
-    "key_signals": ["3-5条，提炼当日最重要信号；每条尽量短，不要写成长句"]
-  }},
-  "core_events": [
-    {{
-      "headline": "事件标题",
-      "priority_rank": 1,
-      "coverage_count": 3,
-      "global_score": 9.5,
-      "source_topics": ["相关主题或邮件编号"],
-      "core_facts": ["1-4条，每条尽量一句话，只写硬信息"],
-      "market_views": [
-        {{
-          "source": "观点来源",
-          "stance": "立场",
-          "thesis": "核心论点",
-          "stance_highlight_phrases": ["可选：只有立场特别鲜明时才返回，如'强烈看多'"],
-          "thesis_highlight_phrases": ["这一行核心论点里最值得高亮的1-3个短语，可选"]
-        }}
-      ],
-      "action": "投资启示，优先1句，最多2句",
-      "highlight_phrases": ["本主题最该高亮的1-4个短语，可选"],
-      "attribution_note": "如有外部引述或传闻，明确说明真实主语；没有可留空字符串",
-      "source_evidence": ["保留最关键的原文依据，最多3条"]
-    }}
-  ],
-  "local_news": [
-    {{
-      "headline": "容易被忽略的信号标题",
-      "priority_rank": 1,
-        "signal": "发生了什么，优先短句",
-        "importance": "为什么重要，优先1句",
-        "action": "怎么交易/如何跟踪，优先1句",
-      "highlight_phrases": ["可选：这一条里最该高亮的短语"]
-    }}
-  ],
-  "peripheral_intelligence": {{
-    "mapped_events": [
-      {{
-        "event": "外围事件",
-        "related_company": "相关公司",
-        "mapping": "对核心主题的映射"
-      }}
-    ],
-    "cross_market_signals": [
-      {{
-        "headline": "跨市场信号标题",
-        "priority_rank": 1,
-        "bullets": ["2-4条"],
-        "highlight_phrases": ["可选：跨市场映射里最该高亮的短语"]
-      }}
-    ]
-  }},
-  "actionable_ideas": {{
-    "short_term": [
-      {{
-        "idea": "短期(1-5天)交易想法，优先1句，不要写成长段解释",
-        "priority_rank": 1,
-        "coverage_count": 3,
-        "global_score": 9.0,
-        "source_topics": ["来自哪些高优先级主题"],
-        "linked_core_event_headlines": ["引用 `core_events.headline` 中的标题，最多3个"]
-      }}
-    ],
-    "medium_term": [
-      {{
-        "idea": "中期(1-4周)交易想法，优先1句，不要写成长段解释",
-        "priority_rank": 1,
-        "coverage_count": 2,
-        "global_score": 8.5,
-        "source_topics": ["来自哪些高优先级主题"],
-        "linked_core_event_headlines": ["引用 `core_events.headline` 中的标题，最多3个"]
-      }}
-    ],
-    "catalysts": [
-      {{
-        "catalyst": "事件",
-        "time": "时间",
-        "impact": "影响标的",
-        "priority_rank": 1,
-        "coverage_count": 2,
-        "global_score": 8.0,
-        "source_topics": ["关联主题"],
-        "linked_core_event_headlines": ["引用 `core_events.headline` 中的标题，最多3个"]
-      }}
-    ],
-    "bottom_line": "1句总结，短而明确"
-  }}
-}}
-
-## 固定模板说明
-- `Executive Summary` 下面固定只放 `{FIXED_REPORT_TEMPLATE["executive_summary"][0]}` 和 `{FIXED_REPORT_TEMPLATE["executive_summary"][1]}`
-- `核心事件与市场观点` 下的每个主题固定只使用 `{ " / ".join(FIXED_REPORT_TEMPLATE["core_event_labels"]) }`
-- `Local News` 固定只使用 `{ " / ".join(FIXED_REPORT_TEMPLATE["local_news_labels"]) }`
-- `Peripheral Intelligence` 固定拆成 `{ " / ".join(FIXED_REPORT_TEMPLATE["peripheral_subsections"]) }`
-- `Actionable Ideas` 固定拆成 `{FIXED_REPORT_TEMPLATE["actionable_labels"][0]}`、`{FIXED_REPORT_TEMPLATE["actionable_labels"][1]}`、`{FIXED_REPORT_TEMPLATE["actionable_labels"][2]}`
-- `Local News` 与 `Peripheral Intelligence` 承接不属于最高优先级核心覆盖的内容
-- `Actionable Ideas` 不是剩余信息区，而是基于全局信息重新提炼最有行动价值的交易想法与催化剂
-- `core_events`、`Actionable Ideas`、`catalysts` 必须显式给出 `priority_rank / coverage_count / global_score`，本地会据此再做一次排序校验
-- `Actionable Ideas` 与 `catalysts` 应尽量给出 `linked_core_event_headlines`，引用它们所依赖的 `core_events.headline`，本地会把这些引用映射成可解释的 `linked_core_event_ids`
-- `highlight` 属于结构字段：你只需指出哪些短语需要强调，本地模板会统一渲染高亮样式
-- `market_views.source` 不要高亮；`market_views.stance` 只有在态度特别鲜明时才高亮；`market_views.thesis` 单独返回高亮短语
-- `Actionable Ideas` 可以高亮核心判断、趋势与催化逻辑，但不要高亮“继续观察 / 优先关注 / 跟踪”这类交易动作措辞
-- 应优先高亮：程度描述、核心结论、独特定位、趋势判断
-- 不要高亮：纯数字、普通描述性文字、纯ticker、一般事实名词
-- 空值规则：没有内容的数组字段返回 `[]`，字符串字段返回 `""`
-- 缺失值规则：不要返回 `null`、`None`、`N/A`、`未知`、`待定`
-- 禁止补写：不要补充 schema 之外的新字段，不要发明输入中不存在的观点、时间点、催化、数字或引用关系
-- 不要输出 HTML，不要输出 Markdown，不要发明额外顶层模块
-"""
+    return app_llm_prompts.get_fixed_report_schema_prompt()
 
 
 def render_list_html(items: List[Any], highlights: Optional[List[str]] = None) -> str:
-    if not items:
-        return ""
-    rendered_items = []
-    for item in items:
-        if isinstance(item, dict):
-            text = item.get("idea") or item.get("text") or item.get("title") or ""
-            item_highlights = item.get("highlight_phrases") or highlights
-        else:
-            text = item
-            item_highlights = highlights
-        rendered_items.append(f"<li>{escape_with_highlights(text, item_highlights)}</li>")
-    li_items = "".join(rendered_items)
-    return f"<ul>{li_items}</ul>"
+    return app_report_renderer.render_list_html(
+        items,
+        highlights=highlights,
+        escape_with_highlights_fn=escape_with_highlights,
+    )
 
 
 def render_detail_label(label: str) -> str:
-    return f'<h4 class="detail-label">{escape(label)}</h4>'
+    return app_report_renderer.render_detail_label(label)
 
 
 def render_detail_copy(text: str, highlights: Optional[List[str]] = None) -> str:
-    return f'<p class="detail-copy">{escape_with_highlights(text, highlights)}</p>'
+    return app_report_renderer.render_detail_copy(
+        text,
+        highlights=highlights,
+        escape_with_highlights_fn=escape_with_highlights,
+    )
 
 
 def render_detail_list_html(items: List[Any], highlights: Optional[List[str]] = None) -> str:
-    html = render_list_html(items, highlights)
-    return re.sub(r"<(ul|ol)\b", r'<\1 class="detail-list"', html, count=1)
+    return app_report_renderer.render_detail_list_html(
+        items,
+        highlights=highlights,
+        render_list_html_fn=lambda data, current_highlights=None: render_list_html(
+            data,
+            current_highlights,
+        ),
+    )
 
 
 def render_market_views_table(rows: List[Dict[str, str]]) -> str:
-    if not rows:
-        return ""
-
-    body_rows = []
-    for row in rows:
-        body_rows.append(
-            "<tr>"
-            f"<td><strong>{escape(row.get('source', ''))}</strong></td>"
-            f"<td>{escape_with_highlights(row.get('stance', ''), row.get('stance_highlight_phrases'))}</td>"
-            f"<td>{escape_with_highlights(row.get('thesis', ''), row.get('thesis_highlight_phrases'))}</td>"
-            "</tr>"
-        )
-    return (
-        "<table>"
-        "<tr><th>观点来源</th><th>立场</th><th>核心论点</th></tr>"
-        + "".join(body_rows)
-        + "</table>"
+    return app_report_renderer.render_market_views_table(
+        rows,
+        escape_with_highlights_fn=escape_with_highlights,
     )
 
 
 def render_peripheral_table(rows: List[Dict[str, str]]) -> str:
-    if not rows:
-        return ""
-    body_rows = []
-    for row in rows:
-        body_rows.append(
-            "<tr>"
-            f"<td>{escape(row.get('event', ''))}</td>"
-            f"<td>{escape(row.get('related_company', ''))}</td>"
-            f"<td>{escape(row.get('mapping', ''))}</td>"
-            "</tr>"
-        )
-    return (
-        "<table>"
-        "<tr><th>外围事件</th><th>相关公司</th><th>对Key Coverage的映射</th></tr>"
-        + "".join(body_rows)
-        + "</table>"
-    )
+    return app_report_renderer.render_peripheral_table(rows)
 
 
 def render_catalysts_table(rows: List[Dict[str, str]]) -> str:
-    if not rows:
-        return ""
-    body_rows = []
-    for row in rows:
-        body_rows.append(
-            "<tr>"
-            f"<td>{escape(row.get('catalyst', ''))}</td>"
-            f"<td>{escape(row.get('time', ''))}</td>"
-            f"<td>{escape(row.get('impact', ''))}</td>"
-            "</tr>"
-        )
-    return (
-        "<table>"
-        "<tr><th>Catalyst</th><th>时间</th><th>影响标的</th></tr>"
-        + "".join(body_rows)
-        + "</table>"
-    )
+    return app_report_renderer.render_catalysts_table(rows)
 
 
 def build_priority_debug_summary(payload: Dict[str, Any]) -> str:
-    core_event_map = {
-        item.get("core_event_id"): item.get("headline", "")
-        for item in payload.get("core_events", [])
-        if item.get("core_event_id")
-    }
-
-    lines = ["排序与映射摘要:"]
-    if payload.get("core_events"):
-        lines.append("  Key Coverage:")
-        for item in payload["core_events"]:
-            lines.append(
-                "    - {id} | rank={rank} | coverage={coverage} | score={score} | {headline}".format(
-                    id=item.get("core_event_id", "-"),
-                    rank=item.get("priority_rank", "-"),
-                    coverage=item.get("coverage_count", 0),
-                    score=item.get("global_score", 0.0),
-                    headline=item.get("headline", ""),
-                )
-            )
-
-    actionable = payload.get("actionable_ideas", {})
-    for section_key, section_label in [("short_term", "短期想法"), ("medium_term", "中期想法")]:
-        section_items = actionable.get(section_key) or []
-        if not section_items:
-            continue
-        lines.append(f"  {section_label}:")
-        for item in section_items:
-            linked = [
-                core_event_map.get(core_event_id, core_event_id)
-                for core_event_id in (item.get("linked_core_event_ids") or [])
-            ]
-            lines.append(
-                "    - rank={rank} | coverage={coverage} | score={score} | linked={linked} | {idea}".format(
-                    rank=item.get("priority_rank", "-"),
-                    coverage=item.get("coverage_count", 0),
-                    score=item.get("global_score", 0.0),
-                    linked=", ".join(linked) if linked else "[]",
-                    idea=item.get("idea", ""),
-                )
-            )
-
-    catalysts = actionable.get("catalysts") or []
-    if catalysts:
-        lines.append("  Catalysts:")
-        for item in catalysts:
-            linked = [
-                core_event_map.get(core_event_id, core_event_id)
-                for core_event_id in (item.get("linked_core_event_ids") or [])
-            ]
-            lines.append(
-                "    - rank={rank} | coverage={coverage} | score={score} | linked={linked} | {catalyst}".format(
-                    rank=item.get("priority_rank", "-"),
-                    coverage=item.get("coverage_count", 0),
-                    score=item.get("global_score", 0.0),
-                    linked=", ".join(linked) if linked else "[]",
-                    catalyst=item.get("catalyst", ""),
-                )
-            )
-
-    return "\n".join(lines)
+    return app_report_renderer.build_priority_debug_summary(payload)
 
 
 def render_report_html(report_payload: Dict[str, Any], source_emails: Optional[List[Dict]] = None) -> str:
     """用固定模板渲染最终 HTML，避免模型直接输出排版。"""
-    payload = normalize_report_payload(report_payload)
-    logger.info("\n" + build_priority_debug_summary(payload))
-    body_parts = [
-        "<h2>Executive Summary</h2>",
-        f'<p><strong>{FIXED_REPORT_TEMPLATE["executive_summary"][0]}:</strong> {escape(payload["executive_summary"]["market_background"])}</p>',
-        f'<p><strong>{FIXED_REPORT_TEMPLATE["executive_summary"][1]}:</strong></p>',
-        render_list_html(payload["executive_summary"]["key_signals"]),
-        '<div class="divider"></div>',
-        f'<h2>{FIXED_REPORT_TEMPLATE["core_events_h2"]}</h2>',
-    ]
-
-    for index, coverage in enumerate(payload["core_events"], 1):
-        body_parts.append(f"<h3>{index}. {escape(coverage['headline'])}</h3>")
-        if coverage["core_facts"]:
-            body_parts.append(render_detail_label("核心事实"))
-            body_parts.append(render_detail_list_html(coverage["core_facts"], coverage.get("core_fact_highlight_phrases")))
-        body_parts.append(render_detail_label("市场怎么看"))
-        if coverage["market_views"]:
-            body_parts.append(render_market_views_table(coverage["market_views"]))
-        elif coverage["market_take"]:
-            body_parts.append(render_detail_list_html(coverage["market_take"], coverage["highlight_phrases"]))
-        if coverage["action"]:
-            body_parts.append(render_detail_label("投资启示"))
-            body_parts.append(render_detail_copy(coverage["action"], coverage.get("action_highlight_phrases")))
-
-    body_parts.append('<div class="divider"></div>')
-    body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["local_news_h2"]}</h2>')
-    for index, item in enumerate(payload["local_news"], 1):
-        body_parts.append(f"<h3>{index}. {escape(item['headline'])}</h3>")
-        body_parts.append(render_detail_label("信号"))
-        body_parts.append(render_detail_copy(item["signal"], item.get("signal_highlight_phrases")))
-        body_parts.append(render_detail_label("为什么重要"))
-        body_parts.append(render_detail_copy(item["importance"], item.get("importance_highlight_phrases")))
-        body_parts.append(render_detail_label("Action"))
-        body_parts.append(render_detail_copy(item["action"], item.get("action_highlight_phrases")))
-
-    body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["peripheral_h2"]}</h2>')
-    body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["peripheral_subsections"][0]}</h3>')
-    body_parts.append(render_peripheral_table(payload["peripheral_intelligence"]["mapped_events"]))
-    body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["peripheral_subsections"][1]}</h3>')
-    for item in payload["peripheral_intelligence"]["cross_market_signals"]:
-        if item["headline"]:
-            body_parts.append(f'<p><strong>{escape(item["headline"])}</strong></p>')
-        body_parts.append(render_list_html(item["bullets"], item.get("bullet_highlight_phrases")))
-
-    body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["actionable_h2"]}</h2>')
-    body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["actionable_labels"][0]}</h3>')
-    body_parts.append(render_list_html(payload["actionable_ideas"]["short_term"]))
-    body_parts.append(f'<h3>{FIXED_REPORT_TEMPLATE["actionable_labels"][1]}</h3>')
-    body_parts.append(render_list_html(payload["actionable_ideas"]["medium_term"]))
-    body_parts.append(f'<h2>{FIXED_REPORT_TEMPLATE["actionable_labels"][2]}</h2>')
-    body_parts.append(render_catalysts_table(payload["actionable_ideas"]["catalysts"]))
-    body_parts.append(f'<p><strong>{FIXED_REPORT_TEMPLATE["actionable_labels"][3]}:</strong> {escape(payload["actionable_ideas"]["bottom_line"])}</p>')
-    return format_html_report(
-        "\n".join(part for part in body_parts if part),
+    return app_report_renderer.render_report_html(
+        report_payload,
         source_emails=source_emails,
-        normalize_body=False,
+        normalize_report_payload_fn=normalize_report_payload,
+        logger=logger,
+        fixed_report_template=FIXED_REPORT_TEMPLATE,
+        render_list_html_fn=lambda items, highlights=None: render_list_html(items, highlights),
+        render_detail_label_fn=render_detail_label,
+        render_detail_copy_fn=lambda text, highlights=None: render_detail_copy(text, highlights),
+        render_detail_list_html_fn=lambda items, highlights=None: render_detail_list_html(items, highlights),
+        render_market_views_table_fn=render_market_views_table,
+        render_peripheral_table_fn=render_peripheral_table,
+        render_catalysts_table_fn=render_catalysts_table,
+        build_priority_debug_summary_fn=build_priority_debug_summary,
+        format_html_report_fn=format_html_report,
     )
 
 
@@ -2425,66 +1066,24 @@ def analyze_batch_summary_with_llm(
     batch_total: int,
     routing_state: Optional[Dict[str, Any]] = None,
 ) -> Dict:
-    emails_text = build_emails_text(batch_emails, total_email_count, total_body_budget=MAX_PROMPT_BODY_CHARS // 2)
-    batch_email_ids = ", ".join(str(email.get("_analysis_index")) for email in batch_emails)
-
-    system_prompt = build_report_system_prompt(f"""{get_batch_summary_stage_rules()}
-
-## JSON 结构
-{{
-  "batch_index": {batch_index},
-  "batch_total": {batch_total},
-  "email_ids": [{batch_email_ids}],
-  "topics": [
-    {{
-      "title": "主题名称",
-      "email_ids": [1, 2],
-      "coverage_count": 2,
-      "merge_key": "跨批次对齐键，尽量稳定，写成 `对象 | 事件/催化 | 方向`",
-      "time_horizon": "短期 / 中期 / 长期 / 未知",
-      "target_slot": "core_events / local_news / peripheral_intelligence / actionable_ideas",
-      "fact_subject": "谁是客观事实的主体",
-      "opinion_subject": "谁提出了观点；如果没有观点可填空字符串",
-      "info_type": "事实 / 机构观点 / 外部引述 / 市场传闻",
-      "core_facts": ["客观事实1", "客观事实2"],
-      "market_takeaways": ["市场含义1", "市场含义2"],
-      "tickers": ["NVDA", "MU"],
-      "source_evidence": ["保留最关键的原文短句，注明真实主语"]
-    }}
-  ]
-}}
-
-## 补充要求
-- 高频主题必须写明覆盖邮件编号和覆盖邮件数
-- 每个主题必须明确区分“事实主体”和“观点主体”，不能把转述者默认当作观点提出者
-- 如果邮件尾部是签名、免责声明、法律声明，不要纳入摘要
-- 只保留对最终 HF Morning Brief 有帮助的信息
-""")
-
-    user_prompt = f"""请把下面这批邮件整理成结构化中间摘要，供后续二次合并。
-
-要求：
-- 使用简体中文
-- 只返回合法 JSON
-
-当前批次: {batch_index}/{batch_total}
-批次包含邮件编号: {batch_email_ids}
-
-邮件内容：
-{emails_text}
-"""
-
-    raw = generate_with_llm(
-        system_prompt,
-        user_prompt,
-        emails=batch_emails,
+    return app_report_pipeline.analyze_batch_summary_with_llm(
+        batch_emails,
+        total_email_count=total_email_count,
+        batch_index=batch_index,
+        batch_total=batch_total,
         routing_state=routing_state,
-        response_format=build_batch_summary_response_format(),
+        build_emails_text_fn=lambda emails, count, total_body_budget: build_emails_text(
+            emails,
+            count,
+            total_body_budget=MAX_PROMPT_BODY_CHARS // 2,
+        ),
+        build_report_system_prompt_fn=build_batch_system_prompt,
+        get_visual_context_prompt_rules_fn=lambda: "",
+        get_batch_summary_stage_rules_fn=lambda: "",
+        generate_with_llm_fn=generate_with_llm,
+        build_batch_summary_response_format_fn=build_batch_summary_response_format,
+        parse_batch_summary_json_fn=parse_batch_summary_json,
     )
-    parsed = parse_batch_summary_json(raw)
-    parsed["batch_index"] = batch_index
-    parsed["batch_total"] = batch_total
-    return parsed
 
 
 def merge_batch_summaries_with_llm(
@@ -2493,115 +1092,54 @@ def merge_batch_summaries_with_llm(
     source_emails: Optional[List[Dict]] = None,
     routing_state: Optional[Dict[str, Any]] = None,
 ) -> str:
-    summaries_text = json.dumps(batch_summaries, ensure_ascii=False, indent=2)
-
-    system_prompt = build_report_system_prompt(f"""{get_merge_stage_rules(total_email_count)}
-
-{get_fixed_report_schema_prompt()}
-""")
-
-    user_prompt = f"""请将以下结构化子批次摘要合并成最终中文晨报 JSON。
-
-要求：
-- 使用简体中文
-- 只返回合法 JSON
-
-子批次摘要：
-{summaries_text}
-"""
-
-    raw = generate_with_llm(
-        system_prompt,
-        user_prompt,
+    return app_report_pipeline.merge_batch_summaries_with_llm(
+        batch_summaries,
+        total_email_count=total_email_count,
+        source_emails=source_emails,
         routing_state=routing_state,
-        response_format=build_report_response_format(),
+        build_report_system_prompt_fn=build_merge_system_prompt,
+        get_merge_stage_rules_fn=lambda _count: "",
+        get_fixed_report_schema_prompt_fn=get_fixed_report_schema_prompt,
+        generate_with_llm_fn=generate_with_llm,
+        build_report_response_format_fn=build_report_response_format,
+        parse_report_payload_json_fn=parse_report_payload_json,
+        render_report_html_fn=render_report_html,
     )
-    return render_report_html(parse_report_payload_json(raw), source_emails=source_emails)
 
 
 
 
 # ============ 状态管理 ============
 def load_state() -> Dict:
-    """加载状态文件"""
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {
-        "last_processed_date": None,
-        "last_check_time": None,
-        "last_error": None,
-    }
+    """加载运行时状态。主状态源已统一收敛到 SQLite。"""
+    return email_db.get_runtime_state()
 
 
 def save_state(state: Dict):
-    """保存状态文件"""
-    with open(STATE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    """保存运行时状态。主状态源已统一收敛到 SQLite。"""
+    email_db.save_runtime_state(state)
 
 
 def should_trigger() -> bool:
-    """判断是否应该触发（每天只运行一次）"""
-    now_bjt = datetime.now(BJT)
-    state = load_state()
-    last_processed = state.get("last_processed_date")
-
-    if last_processed == now_bjt.strftime("%Y-%m-%d"):
-        return False
-
-    return True
+    """判断今天是否还需要发送 daily 报告。主状态源以数据库发送记录为准。"""
+    today = datetime.now(BJT).strftime("%Y-%m-%d")
+    return not email_db.has_successful_report_on_date(today, report_type="daily")
 
 
 # ============ 邮件收取 ============
-@retry_on_error(max_retries=3, delay=3.0, backoff=2.0)
+@app_runtime_qclaw_support.retry_on_error(logger=logger, max_retries=3, delay=3.0, backoff=2.0)
 def fetch_emails(limit: int = 20) -> List[Dict]:
     """从Gmail收取邮件"""
-    config = load_config()
-    api_key = config.get("api_key", "")
-    imap_cfg = config.get("imap", {})
-    imap_host = imap_cfg.get("host", "imap.gmail.com")
-
-    logger.info(f"📬 正在从 {imap_host} 收取邮件...")
-
-    resp = session.get(
-        f"{EMAIL_API}/api/emails",
-        params={"api_key": api_key, "limit": limit, "source": imap_host},
-        timeout=120
+    return app_mail_service.fetch_emails_and_persist(
+        limit=limit,
+        load_config_fn=load_config,
+        parse_received_after_local_fn=parse_received_after_local,
+        should_accept_sender_fn=should_accept_sender,
+        get_message_local_datetime_fn=get_message_local_datetime,
+        build_attachment_records_fn=_build_attachment_records,
+        email_db_module=email_db,
+        logger=logger,
     )
-    data = resp.json()
-
-    if data.get("success"):
-        emails = data["emails"]
-        logger.info(f"✅ 成功收取 {len(emails)} 封邮件")
-        # 保存到数据库（去重），作为后续分析/标记的唯一事实来源
-        try:
-            added = email_db.add_emails(emails)
-            if added:
-                logger.info(f"💾 已新增 {added} 封邮件到 SQLite")
-        except Exception as e:
-            logger.warning(f"⚠️ 写入数据库失败（将继续尝试分析本次收取结果）: {e}")
-        return emails
-    else:
-        error_msg = data.get('detail', '未知错误')
-        logger.error(f"❌ 收取邮件失败: {error_msg}")
-        raise Exception(error_msg)
-
-
-def save_pending_emails(emails: List[Dict]):
-    """保存待处理的邮件到JSON文件"""
-    if not emails:
-        return
-
-    data = {
-        "timestamp": datetime.now(BJT).isoformat(),
-        "count": len(emails),
-        "emails": emails
-    }
-
-    with open(PENDING_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    logger.info(f"💾 已保存 {len(emails)} 封邮件到 {PENDING_FILE}")
 
 
 def mark_emails_processed(email_uids: List[str]):
@@ -2628,62 +1166,20 @@ def call_llm_api(
     user_content_blocks: Optional[List[Dict[str, Any]]] = None,
     response_format: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """
-    调用兼容 chat/completions 的大模型 API，返回文本结果或 None
-    """
-    url = f"{api_config['base_url']}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_config['api_key']}"
-    }
-
-    user_message_content: Any
-    if user_content_blocks:
-        user_message_content = [{"type": "text", "text": user_prompt}, *user_content_blocks]
-    else:
-        user_message_content = user_prompt
-
-    payload = {
-        "model": api_config["model"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message_content}
-        ],
-    }
-    if response_format and supports_openai_json_schema_response_format(api_config):
-        payload["response_format"] = response_format
-
-    if is_openai_chat_api(api_config) and is_openai_gpt5_family(api_config):
-        payload["max_completion_tokens"] = MAX_COMPLETION_TOKENS
-        reasoning_effort = str(api_config.get("reasoning_effort", "") or "").strip()
-        if reasoning_effort:
-            payload["reasoning_effort"] = reasoning_effort
-        else:
-            payload["temperature"] = 1.0
-    else:
-        payload["temperature"] = 1.0
-        payload["max_tokens"] = MAX_COMPLETION_TOKENS
-
-    llm_session = get_llm_http_session(api_config)
-    resp = llm_session.post(url, json=payload, headers=headers, timeout=300)
-    try:
-        resp.raise_for_status()
-    except Exception:
-        logger.warning(f"⚠️ API {api_config['base_url']} HTTP错误: {resp.status_code} {resp.text[:200]}")
-        return None
-
-    try:
-        result = resp.json()
-    except Exception:
-        logger.warning(f"⚠️ API {api_config['base_url']} 返回非JSON: {resp.text[:200]}")
-        return None
-
-    if "choices" in result and len(result["choices"]) > 0:
-        return result["choices"][0]["message"]["content"]
-    else:
-        error_msg = str(result)
-        logger.warning(f"⚠️ API {api_config['base_url']} 返回错误: {error_msg}")
-        return None
+    """调用兼容 chat/completions 的大模型 API，返回文本结果或 None。"""
+    direct_session, proxied_session = _ensure_llm_sessions()
+    return app_llm_client.call_llm_api(
+        api_config,
+        system_prompt,
+        user_prompt,
+        user_content_blocks=user_content_blocks,
+        response_format=response_format,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        direct_session=direct_session,
+        proxy_session=proxied_session,
+        get_llm_http_session_fn=get_llm_http_session,
+        logger=logger,
+    )
 
 
 def call_llm_api_with_retries(
@@ -2698,38 +1194,19 @@ def call_llm_api_with_retries(
     response_format: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """对单个模型做有限重试，失败后交由上层切换备用模型。"""
-    current_delay = delay
-    last_error = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            logger.info(f"🤖 正在调用主/备大模型分析... ({label}: {api_config['base_url']})")
-            html_content = call_llm_api(
-                api_config,
-                system_prompt,
-                user_prompt,
-                user_content_blocks=user_content_blocks,
-                response_format=response_format,
-            )
-            if html_content:
-                if attempt > 0:
-                    logger.info(f"✅ {label} 第 {attempt + 1} 次尝试成功")
-                return html_content
-
-            last_error = Exception("empty response")
-            logger.warning(f"⚠️ {label} 返回空结果")
-        except Exception as e:
-            last_error = e
-            logger.warning(f"⚠️ {label} 调用失败: {e}")
-
-        if attempt < max_retries:
-            logger.warning(f"⚠️ {label} 将在 {current_delay:.1f} 秒后重试...")
-            time.sleep(current_delay)
-            current_delay *= backoff
-
-    if last_error:
-        logger.warning(f"⚠️ {label} 最终失败: {last_error}")
-    return None
+    return app_llm_client.call_llm_api_with_retries(
+        api_config,
+        system_prompt,
+        user_prompt,
+        label=label,
+        max_retries=max_retries,
+        delay=delay,
+        backoff=backoff,
+        user_content_blocks=user_content_blocks,
+        response_format=response_format,
+        call_llm_api_fn=call_llm_api,
+        logger=logger,
+    )
 
 
 def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
@@ -2737,101 +1214,32 @@ def analyze_emails_with_llm(emails: List[Dict]) -> Optional[str]:
     调用主/备大模型分析邮件，生成 HF Morning Brief HTML
     支持尾部清洗、超长上下文拆批分析，以及主/备模型自动切换
     """
-    email_count = len(emails)
-    email_batches = split_emails_for_analysis(emails)
-    routing_state = {"disabled_model_keys": set()}
-
-    if len(email_batches) == 1:
-        emails_text = build_emails_text(email_batches[0], email_count, total_body_budget=MAX_PROMPT_BODY_CHARS)
-        system_prompt = build_report_system_prompt(f"""## 图片理解指引（重要！必须遵循）
-邮件中可能包含图片（图表、截图、照片等），请按以下规则理解和处理：
-
-1. **图表类图片**：
-   - 提炼图表中的核心数据结论
-   - 不要在报告中展示原始图表
-   - 将图表传达的关键数据信息转化为文字描述
-
-2. **非图表类图片**（截图、照片）：
-   - 深度解读隐含信息，从以下维度分析：
-     * 场合：这是什么场景？发布会？财报电话会？活动？
-     * 人物：有哪些关键人物？他们的职位和身份？
-     * 时机：为什么是现在？有什么特殊时间节点？
-     * 公关策略：传达了什么信息？正面还是负面？
-     * 信号强度：这个图片传递的信号有多强？
-
-3. **图片融入方式**：
-   - 图片信息应作为论据自然融入正文
-   - 不要单独标注"图片佐证"
-   - 直接写出从图片中解读出的Insight
-
-{get_fixed_report_schema_prompt()}
-""")
-
-        user_prompt = f"""请分析以下邮件，生成最终晨报 JSON。
-
-要求：
-- 使用简体中文输出所有字段内容
-- 只返回合法 JSON，不要补充解释
-
-邮件内容：
-{emails_text}"""
-
-        raw = generate_with_llm(
-            system_prompt,
-            user_prompt,
-            emails=emails,
-            routing_state=routing_state,
-            response_format=build_report_response_format(),
-        )
-        html_content = render_report_html(parse_report_payload_json(raw), source_emails=emails)
-        logger.info("✅ 大模型分析完成")
-        return html_content
-
-    logger.info(f"✂️ 上下文较长，拆分为 {len(email_batches)} 个批次进行分析后合并")
-    batch_summaries = []
-    for idx, batch in enumerate(email_batches, 1):
-        logger.info(f"🧩 正在分析子批次 {idx}/{len(email_batches)}（{len(batch)} 封邮件）")
-        batch_summaries.append(
-            analyze_batch_summary_with_llm(
-                batch,
-                total_email_count=email_count,
-                batch_index=idx,
-                batch_total=len(email_batches),
-                routing_state=routing_state,
-            )
-        )
-
-    html_content = merge_batch_summaries_with_llm(
-        batch_summaries,
-        total_email_count=email_count,
-        source_emails=emails,
-        routing_state=routing_state,
+    return app_report_pipeline.analyze_emails_with_llm(
+        emails,
+        choose_visual_analysis_api_config_fn=choose_visual_analysis_api_config,
+        split_emails_for_analysis_fn=split_emails_for_analysis,
+        build_emails_text_fn=lambda batch_emails, total_email_count, total_body_budget: build_emails_text(
+            batch_emails,
+            total_email_count,
+            total_body_budget=MAX_PROMPT_BODY_CHARS if total_body_budget <= 0 else total_body_budget,
+        ),
+        build_report_system_prompt_fn=build_report_system_prompt,
+        get_visual_context_prompt_rules_fn=app_llm_prompts.get_visual_context_prompt_rules,
+        get_fixed_report_schema_prompt_fn=get_fixed_report_schema_prompt,
+        generate_with_llm_fn=generate_with_llm,
+        build_report_response_format_fn=build_report_response_format,
+        parse_report_payload_json_fn=parse_report_payload_json,
+        render_report_html_fn=render_report_html,
+        analyze_batch_summary_with_llm_fn=analyze_batch_summary_with_llm,
+        merge_batch_summaries_with_llm_fn=merge_batch_summaries_with_llm,
+        logger=logger,
     )
-    logger.info("✅ 大模型分析完成")
-    return html_content
 
 
 # ============ 报告处理 ============
 def validate_html(html_content: str) -> tuple[bool, str]:
-    """
-    验证HTML内容完整性
-
-    返回: (是否有效, 错误信息)
-    """
-    if not html_content or len(html_content.strip()) < 100:
-        return False, "内容过短，可能不完整"
-
-    # 检查必需的HTML标签
-    required_tags = ['<html', '<head', '<body', '</html>']
-    for tag in required_tags:
-        if tag.lower() not in html_content.lower():
-            return False, f"缺少必需标签: {tag}"
-
-    # 检查标签是否闭合
-    if html_content.count('<html') != html_content.count('</html>'):
-        return False, "html标签未正确闭合"
-
-    return True, ""
+    """验证HTML内容完整性。"""
+    return app_report_renderer.validate_html(html_content)
 
 
 def estimate_read_minutes_from_html(body_content: str) -> int:
@@ -2845,38 +1253,19 @@ def estimate_read_minutes_from_html(body_content: str) -> int:
 
 def extract_recognized_source_label_from_email(email: Dict) -> str:
     """优先从邮件主题/正文中提取更真实的机构来源标签。"""
-    search_text = " ".join(
-        [
-            str(email.get("subject") or ""),
-            str(email.get("body") or ""),
-            str(email.get("from_name") or ""),
-        ]
-    ).lower()
-
-    for label, patterns in SOURCE_LABEL_PATTERNS:
-        for pattern in patterns:
-            if re.search(pattern, search_text, flags=re.IGNORECASE):
-                return label
-
-    return ""
+    return app_report_renderer.extract_recognized_source_label_from_email(
+        email,
+        source_label_patterns=SOURCE_LABEL_PATTERNS,
+    )
 
 
 def build_report_meta_html(source_emails: Optional[List[Dict]], body_content: str) -> str:
     """在标题下方展示阅读时长和来源。"""
-    read_minutes = estimate_read_minutes_from_html(body_content)
-    labels = []
-    seen = set()
-    for email in source_emails or []:
-        label = extract_recognized_source_label_from_email(email)
-        if not label:
-            continue
-        key = label.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        labels.append(label)
-    source_text = " + ".join(labels[:4]) if labels else "Whitelisted source emails"
-    return f'<div class="meta">Prepared by: AI Research Assistant | Source: {escape(source_text)} | Reading time: {read_minutes} mins</div>'
+    return app_report_renderer.build_report_meta_html(
+        source_emails,
+        body_content,
+        extract_source_label_fn=extract_recognized_source_label_from_email,
+    )
 
 
 def normalize_report_body_content(body_content: str) -> str:
@@ -2892,59 +1281,33 @@ def normalize_report_body_content(body_content: str) -> str:
     提醒：
     - prompt 只是建议，本地规则才是最终版式真源。
     """
-    normalized = body_content or ""
-    normalized = re.sub(r'<(?:p|div)\s+class="meta">.*?</(?:p|div)>', '', normalized, flags=re.IGNORECASE | re.DOTALL)
-    normalized = re.sub(r'<p>\s*阅读时间[^<]*</p>', '', normalized, flags=re.IGNORECASE | re.DOTALL)
-    normalized = normalize_legacy_label_boxes(normalized)
-    normalized = normalize_subsection_headings(normalized)
-    normalized = normalize_standalone_labels(normalized)
-    normalized = normalize_existing_heading_tags(normalized)
-    normalized = normalize_semantic_callout_blocks(normalized)
-    normalized = normalize_inline_labeled_paragraphs(normalized)
-    normalized = strip_emojis_from_html_content(normalized)
-    normalized = strip_highlight_inside_headings(normalized)
-    return normalized
+    return app_report_renderer.normalize_report_body_content(
+        body_content,
+        normalize_legacy_label_boxes_fn=normalize_legacy_label_boxes,
+        normalize_subsection_headings_fn=normalize_subsection_headings,
+        normalize_standalone_labels_fn=normalize_standalone_labels,
+        normalize_existing_heading_tags_fn=normalize_existing_heading_tags,
+        normalize_semantic_callout_blocks_fn=normalize_semantic_callout_blocks,
+        normalize_inline_labeled_paragraphs_fn=normalize_inline_labeled_paragraphs,
+        strip_emojis_from_html_content_fn=strip_emojis_from_html_content,
+        strip_highlight_inside_headings_fn=strip_highlight_inside_headings,
+    )
 
 
 def strip_emojis_from_html_content(body_content: str) -> str:
     """本地禁用 emoji，避免视觉风格漂移和模型偶发装饰性输出。"""
-    if not body_content:
-        return body_content
-    return EMOJI_PATTERN.sub("", body_content)
+    return app_report_renderer.strip_emojis_from_html_content(
+        body_content,
+        emoji_pattern=EMOJI_PATTERN,
+    )
 
 
 def normalize_legacy_label_boxes(body_content: str) -> str:
     """把旧版 action-box/signal-box 渲染收敛成当前固定标签结构。"""
-    if not body_content:
-        return body_content
-
-    supported_labels = {"投资启示", "信号", "为什么重要", "Action"}
-    pattern = (
-        r'<div\s+class="(?:action-box|signal-box)">\s*'
-        r'<div\s+class="callout-title">\s*(.*?)\s*</div>\s*'
-        r'((?:<p\b[^>]*>.*?</p>\s*|<ul\b[^>]*>.*?</ul>\s*|<ol\b[^>]*>.*?</ol>\s*|'
-        r'<table\b[^>]*>.*?</table>\s*|<blockquote\b[^>]*>.*?</blockquote>\s*)+)'
-        r'</div>'
+    return app_report_renderer.normalize_legacy_label_boxes(
+        body_content,
+        supported_labels=FIXED_DETAIL_LABELS,
     )
-
-    def replace_box(match):
-        label = re.sub(r"<[^>]+>", "", match.group(1)).strip()
-        content = (match.group(2) or "").strip()
-        if label not in supported_labels or not content:
-            return match.group(0)
-        return f'<h4 class="detail-label">{label}</h4>\n{content}'
-
-    previous = None
-    normalized = body_content
-    while previous != normalized:
-        previous = normalized
-        normalized = re.sub(
-            pattern,
-            replace_box,
-            normalized,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    return normalized
 
 
 def format_html_report(
@@ -2952,347 +1315,113 @@ def format_html_report(
     source_emails: Optional[List[Dict]] = None,
     normalize_body: bool = True,
 ) -> str:
-    """
-    格式校准：将模型生成的 HTML 格式化为标准格式
-    应用参考文件的CSS样式和结构
-    """
-    import re
-
-    # 读取参考CSS
-    css_file = os.path.join(BASE_DIR, "reference_css.txt")
-    reference_css = ""
-    if os.path.exists(css_file):
-        with open(css_file, 'r', encoding='utf-8') as f:
-            reference_css = f.read()
-
-    # 提取body内容
-    body_match = re.search(r'<body>(.*?)</body>', html_content, re.DOTALL)
-    body_content = body_match.group(1) if body_match else html_content
-    if normalize_body:
-        body_content = normalize_report_body_content(body_content)
-
-    # 构建标准化HTML
-    today_str = datetime.now(BJT).strftime('%Y-%m-%d')
-    standardized_title = f"AI Morning Brief | {today_str}"
-
-    if re.search(r'<h1\b[^>]*>.*?</h1>', body_content, re.IGNORECASE | re.DOTALL):
-        body_content = re.sub(
-            r'<h1\b[^>]*>.*?</h1>',
-            f'<h1>{standardized_title}</h1>',
-            body_content,
-            count=1,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    else:
-        body_content = f"<h1>{standardized_title}</h1>\n{body_content}"
-
-    meta_html = build_report_meta_html(source_emails, body_content)
-    body_content = re.sub(
-        r'(<h1\b[^>]*>.*?</h1>)',
-        r'\1' + "\n" + meta_html,
-        body_content,
-        count=1,
-        flags=re.IGNORECASE | re.DOTALL,
+    """将模型生成的 HTML 格式化为标准格式。"""
+    return app_report_renderer.format_html_report(
+        html_content,
+        source_emails=source_emails,
+        normalize_body=normalize_body,
+        base_dir=BASE_DIR,
+        now_fn=lambda: datetime.now(BJT),
+        build_report_meta_html_fn=build_report_meta_html,
+        normalize_report_body_content_fn=normalize_report_body_content,
     )
-
-    formatted_html = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>{standardized_title}</title>
-    <style>
-{reference_css}
-    </style>
-</head>
-<body>
-    <div class="container">
-{body_content}
-    </div>
-</body>
-</html>'''
-
-    return formatted_html
 
 
 def normalize_subsection_headings(body_content: str) -> str:
     """只把白名单里的真正 subsection 提升标题，避免字段标签误升层级。"""
-    if not body_content:
-        return body_content
-
-    def replace_heading(match):
-        raw_heading = re.sub(r"<[^>]+>", "", match.group(1)).strip()
-        if not raw_heading or len(raw_heading) > 80:
-            return match.group(0)
-
-        normalized = raw_heading.rstrip(":：").strip()
-        if not normalized:
-            return match.group(0)
-
-        if normalized not in SECTION_SUBHEADINGS:
-            return match.group(0)
-
-        return f"<h2>{normalized}</h2>"
-
-    return re.sub(
-        r"<p>\s*<strong>(.*?)</strong>\s*</p>",
-        replace_heading,
+    return app_report_renderer.normalize_subsection_headings(
         body_content,
-        flags=re.IGNORECASE | re.DOTALL,
+        section_subheadings=SECTION_SUBHEADINGS,
     )
 
 
 def strip_highlight_inside_headings(body_content: str) -> str:
-    """标题里不保留 highlight，避免高亮跑到 heading 上。"""
-    if not body_content:
-        return body_content
-
-    def replace_heading(match):
-        tag = match.group(1)
-        attrs = match.group(2) or ""
-        inner = match.group(3)
-        cleaned_inner = re.sub(
-            r'<span\s+class="highlight">(.*?)</span>',
-            r'\1',
-            inner,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        return f"<{tag}{attrs}>{cleaned_inner}</{tag}>"
-
-    return re.sub(
-        r"<(h[1-4])([^>]*)>(.*?)</\1>",
-        replace_heading,
-        body_content,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    return app_report_renderer.strip_highlight_inside_headings(body_content)
 
 
 def normalize_standalone_labels(body_content: str) -> str:
     """把常见的独立粗体标签提升成稳定的小节标题。"""
-    if not body_content:
-        return body_content
-
-    def replace_label(match):
-        raw_label = re.sub(r"<[^>]+>", "", match.group(1)).strip()
-        normalized = raw_label.rstrip(":：").strip()
-        if normalized in SECTION_SUBHEADINGS:
-            return f"<h2>{normalized}</h2>"
-        if normalized in TIME_HORIZON_SUBHEADINGS:
-            return f'<h3 class="horizon-heading">{normalized}</h3>'
-        if normalized in STANDALONE_SUBHEADINGS or normalized in FIXED_DETAIL_LABELS:
-            return f"<h4>{normalized}</h4>"
-        return match.group(0)
-
-    return re.sub(
-        r"<p>\s*<strong>(.*?)</strong>\s*</p>",
-        replace_label,
+    return app_report_renderer.normalize_standalone_labels(
         body_content,
-        flags=re.IGNORECASE | re.DOTALL,
+        section_subheadings=SECTION_SUBHEADINGS,
+        time_horizon_subheadings=TIME_HORIZON_SUBHEADINGS,
+        standalone_subheadings=STANDALONE_SUBHEADINGS,
+        fixed_detail_labels=FIXED_DETAIL_LABELS,
     )
 
 
 def normalize_existing_heading_tags(body_content: str) -> str:
     """把模型直接生成的 h3/h4 标签也收敛到硬规则语义。"""
-    if not body_content:
-        return body_content
-
-    def replace_heading(match):
-        tag = match.group(1).lower()
-        raw_label = re.sub(r"<[^>]+>", "", match.group(3)).strip()
-        normalized = raw_label.rstrip(":：").strip()
-
-        if normalized in SECTION_SUBHEADINGS:
-            return f"<h2>{normalized}</h2>"
-        if normalized in TIME_HORIZON_SUBHEADINGS:
-            return f'<h3 class="horizon-heading">{normalized}</h3>'
-        if normalized in STANDALONE_SUBHEADINGS or normalized in SEMANTIC_CALLOUT_RULES:
-            return f"<h4>{normalized}</h4>"
-        if tag == "h3" and normalized != raw_label:
-            return f"<h3>{normalized}</h3>"
-        return match.group(0)
-
-    return re.sub(
-        r"<(h[3-4])([^>]*)>(.*?)</\1>",
-        replace_heading,
+    return app_report_renderer.normalize_existing_heading_tags(
         body_content,
-        flags=re.IGNORECASE | re.DOTALL,
+        section_subheadings=SECTION_SUBHEADINGS,
+        time_horizon_subheadings=TIME_HORIZON_SUBHEADINGS,
+        standalone_subheadings=STANDALONE_SUBHEADINGS,
+        semantic_callout_rules=SEMANTIC_CALLOUT_RULES,
     )
 
 
 def build_semantic_callout(label: str, content_html: str) -> Optional[str]:
     """按硬规则把特定标签渲染成固定样式的提示框。"""
-    css_class = SEMANTIC_CALLOUT_RULES.get(label)
-    if not css_class:
-        return None
-
-    content = (content_html or "").strip()
-    if not content:
-        return None
-
-    if not re.match(r"^<(p|ul|ol|table|div|blockquote)\b", content, flags=re.IGNORECASE):
-        content = f"<p>{content}</p>"
-
-    return f'<div class="{css_class}"><div class="callout-title">{label}</div>{content}</div>'
+    return app_report_renderer.build_semantic_callout(
+        label,
+        content_html,
+        semantic_callout_rules=SEMANTIC_CALLOUT_RULES,
+    )
 
 
 def normalize_semantic_callout_blocks(body_content: str) -> str:
     """把独立标签标题 + 紧随内容，收敛成固定样式的提示框。"""
-    if not body_content:
-        return body_content
-
-    labels_pattern = "|".join(re.escape(label) for label in sorted(SEMANTIC_CALLOUT_RULES, key=len, reverse=True))
-    block_pattern = (
-        rf"<h4>\s*({labels_pattern})\s*</h4>\s*"
-        rf"((?:<p\b[^>]*>.*?</p>|<ul\b[^>]*>.*?</ul>|<ol\b[^>]*>.*?</ol>|<table\b[^>]*>.*?</table>|<div\b[^>]*>.*?</div>))"
+    return app_report_renderer.normalize_semantic_callout_blocks(
+        body_content,
+        semantic_callout_rules=SEMANTIC_CALLOUT_RULES,
+        fixed_detail_labels=FIXED_DETAIL_LABELS,
+        build_semantic_callout_fn=build_semantic_callout,
     )
-
-    def replace_block(match):
-        label = match.group(1).strip()
-        content = match.group(2).strip()
-        if label in FIXED_DETAIL_LABELS:
-            return f'<h4 class="detail-label">{label}</h4>\n{content}'
-        return build_semantic_callout(label, content) or match.group(0)
-
-    previous = None
-    normalized = body_content
-    while previous != normalized:
-        previous = normalized
-        normalized = re.sub(
-            block_pattern,
-            replace_block,
-            normalized,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    return normalized
 
 
 def normalize_inline_labeled_paragraphs(body_content: str) -> str:
     """规范行内标签段落，减少同类内容一会儿是正文一会儿是提示框。"""
-    if not body_content:
-        return body_content
-
-    def replace_inline(match):
-        raw_label = re.sub(r"<[^>]+>", "", match.group(1)).strip()
-        label = raw_label.rstrip(":：").strip()
-        content = match.group(2).strip()
-
-        if not content:
-            return match.group(0)
-
-        if label in FIXED_DETAIL_LABELS:
-            return f'<h4 class="detail-label">{label}</h4>\n<p class="detail-copy">{content}</p>'
-
-        semantic_callout = build_semantic_callout(label, content)
-        if semantic_callout:
-            return semantic_callout
-
-        return f'<p class="label-line"><strong>{label}：</strong>{content}</p>'
-
-    return re.sub(
-        r"<p>\s*<strong>([^<]{1,40})</strong>\s*[:：]?\s*(.*?)</p>",
-        replace_inline,
+    return app_report_renderer.normalize_inline_labeled_paragraphs(
         body_content,
-        flags=re.IGNORECASE | re.DOTALL,
+        fixed_detail_labels=FIXED_DETAIL_LABELS,
+        build_semantic_callout_fn=build_semantic_callout,
     )
 
 
 def save_report(html_content: str, source_emails: Optional[List[Dict]] = None) -> Optional[str]:
     """保存 HTML 报告到文件"""
-    if not html_content:
-        return None
-
-    # 清理可能的 markdown 代码块
-    if html_content.strip().startswith("```html"):
-        html_content = html_content.strip()[7:]
-    if html_content.strip().startswith("```"):
-        html_content = html_content.strip()[3:]
-    if html_content.strip().endswith("```"):
-        html_content = html_content.strip()[:-3]
-
-    # 验证HTML内容；如果不是完整HTML，先尝试自动包裹
-    is_valid, error_msg = validate_html(html_content)
-    if not is_valid:
-        logger.warning(f"⚠️ HTML验证未通过: {error_msg}，尝试自动包裹为完整HTML")
-        html_content = format_html_report(html_content, source_emails=source_emails)
-        is_valid, error_msg = validate_html(html_content)
-        if not is_valid:
-            logger.error(f"❌ HTML验证失败: {error_msg}")
-            return None
-    else:
-        # 格式校准 - 应用参考文件的CSS样式
-        html_content = format_html_report(html_content, source_emails=source_emails)
-
-    logger.info("✅ 格式校准完成")
-
-    # 双写报告文件：
-    # 1. 保留带时间戳的工件，避免 daily / supplement / 重跑互相覆盖
-    # 2. 额外覆盖一份不带时间戳的“最终产物”，方便对外查看和引用
-    now_bjt = datetime.now(BJT)
-    today_str = now_bjt.strftime("%Y%m%d")
-    timestamp_str = now_bjt.strftime("%H%M%S")
-    archived_report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}_{timestamp_str}.html")
-    report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}.html")
-
-    try:
-        with open(archived_report_file, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        with open(report_file, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        logger.info(
-            "💾 已保存报告: %s（稳定产物），并留档: %s (%s bytes)",
-            report_file,
-            archived_report_file,
-            len(html_content),
-        )
-        return report_file
-    except Exception as e:
-        logger.error(f"❌ 保存报告失败: {e}")
-        return None
+    return app_report_renderer.save_report(
+        html_content,
+        source_emails=source_emails,
+        validate_html_fn=validate_html,
+        format_html_report_fn=format_html_report,
+        logger=logger,
+        base_dir=BASE_DIR,
+        now_fn=lambda: datetime.now(BJT),
+    )
 
 
 def check_for_report() -> Optional[str]:
     """检查是否生成了报告文件"""
-    today_str = datetime.now(BJT).strftime("%Y%m%d")
-
-    report_file = os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}.html")
-    if os.path.exists(report_file):
-        return report_file
-
-    timestamped_reports = sorted(
-        glob.glob(os.path.join(BASE_DIR, f"AI_Morning_Brief_{today_str}_*.html")),
-        key=os.path.getmtime,
-        reverse=True,
+    return app_report_renderer.check_for_report(
+        base_dir=BASE_DIR,
+        now_fn=lambda: datetime.now(BJT),
+        report_prefix=REPORT_PREFIX,
     )
-    if timestamped_reports:
-        return timestamped_reports[0]
-
-    # 检查旧格式（兼容）
-    report_file = os.path.join(BASE_DIR, f"{REPORT_PREFIX}{today_str}.html")
-    if os.path.exists(report_file):
-        return report_file
-
-    return None
 
 
 def get_report_preview(report_file: str, max_lines: int = 10) -> str:
     """获取报告预览"""
-    try:
-        with open(report_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-            # 提取标题
-            import re
-            titles = re.findall(r'<h[1-3][^>]*>([^<]+)</h[1-3]>', content, re.IGNORECASE)
-            if titles:
-                return " | ".join(titles[:5])
-            return content[:200] + "..."
-    except Exception as e:
-        return f"读取失败: {e}"
+    return app_report_renderer.get_report_preview(report_file, max_lines=max_lines)
 
 
-@retry_on_error(max_retries=2, delay=3.0, backoff=2.0)
+@app_runtime_qclaw_support.retry_on_error(logger=logger, max_retries=2, delay=3.0, backoff=2.0)
 def send_report(
     report_file: str,
     email_uids: List[str],
     email_local_ids: Optional[List[int]] = None,
+    source_emails: Optional[List[Dict[str, Any]]] = None,
     is_supplement: bool = False,
 ) -> bool:
     """发送报告到指定邮箱 - HTML正文
@@ -3303,386 +1432,140 @@ def send_report(
         email_local_ids: 本次报告覆盖的邮件本地ID列表（可选）
         is_supplement: 是否为补充分析
     """
-    config = load_config()
-    api_key = config.get("api_key", "")
-    target_email = config.get("target", {}).get("email")
-
-    if not target_email:
-        logger.error("❌ 未配置目标邮箱")
-        return False
-
-    # 读取HTML报告
-    with open(report_file, 'r', encoding='utf-8') as f:
-        html_content = f.read()
-
-    # 如果是补充分析，添加说明
-    if is_supplement:
-        # 在HTML开头添加补充说明
-        supplement_note = '''
-        <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
-            <strong>⚠️ 补充分析通知</strong><br>
-            此报告为美股交易时段内的补充分析，可能包含延迟收到的市场信息，请注意时效性。
-        </div>
-        '''
-        html_content = html_content.replace('<body>', '<body>' + supplement_note)
-
-    # 直接使用HTML作为邮件正文
-    body_html = html_content
-
-    # 主题添加标识
-    subject_prefix = "补充分析 " if is_supplement else ""
-    logger.info(f"📤 正在发送报告到 {target_email}...")
-
-    resp = session.post(
-        f"{EMAIL_API}/api/send",
-        params={"api_key": api_key},
-        json={
-            "to_email": target_email,
-            "subject": f"AI Morning Brief | {subject_prefix}{datetime.now(BJT).strftime('%Y-%m-%d %H:%M')}",
-            "body": body_html,
-            "body_type": "html"
-        },
-        timeout=60
+    return app_runtime_report_delivery.send_report(
+        report_file,
+        email_uids,
+        email_local_ids=email_local_ids,
+        source_emails=source_emails,
+        is_supplement=is_supplement,
+        load_config_fn=load_config,
+        send_email_fn=lambda **kwargs: app_mail_service.send_email(
+            load_config_fn=load_config,
+            **kwargs,
+        ),
+        now_fn=lambda: datetime.now(BJT),
+        derive_email_scope_fn=app_email_preprocess.derive_email_scope,
+        get_local_ids_by_uids_fn=email_db.get_local_ids_by_uids,
+        finalize_report_success_fn=email_db.finalize_report_success,
+        logger=logger,
     )
-
-    result = resp.json()
-    if result.get("success"):
-        logger.info("✅ 报告发送成功")
-
-        # 原子完成发送记录与 processed 状态更新，避免“已发送但仍 pending”的撕裂状态
-        subject = f"AI Morning Brief | {subject_prefix}{datetime.now(BJT).strftime('%Y-%m-%d %H:%M')}"
-        uids = [uid for uid in (email_uids or []) if uid]
-        local_ids = [lid for lid in (email_local_ids or []) if lid is not None]
-        if not local_ids and uids:
-            local_id_map = email_db.get_local_ids_by_uids(uids)
-            local_ids = [local_id_map.get(uid) for uid in uids if local_id_map.get(uid) is not None]
-        processed_count = email_db.finalize_report_success(
-            email_local_ids=local_ids,
-            email_uids=uids,
-            report_type="supplement" if is_supplement else "daily",
-            subject=subject,
-            recipient=target_email,
-        )
-        logger.info(f"✅ 数据库状态已更新：{processed_count} 封邮件已标记为 processed")
-
-        return True
-    else:
-        error_msg = result.get('detail', '未知错误')
-        logger.error(f"❌ 发送失败: {error_msg}")
-        raise Exception(error_msg)
 
 
 def cleanup():
-    """清理临时文件"""
-    if os.path.exists(PENDING_FILE):
-        os.remove(PENDING_FILE)
-        logger.info(f"🗑️ 已清理 {PENDING_FILE}")
+    """保留 CLI 生命周期清理钩子。"""
+    return None
+
+
+def log_failed_report_attempt(
+    *,
+    email_uids: List[str],
+    email_local_ids: Optional[List[int]] = None,
+    is_supplement: bool = False,
+) -> None:
+    app_runtime_report_delivery.log_failed_report_attempt(
+        email_uids=email_uids,
+        email_local_ids=email_local_ids,
+        is_supplement=is_supplement,
+        load_config_fn=load_config,
+        log_sent_report_fn=email_db.log_sent_report,
+        now_fn=lambda: datetime.now(BJT),
+    )
 
 
 # ============ 主程序 ============
 def print_status():
     """打印详细状态信息"""
-    print("=" * 60)
-    print("🔍 状态检查")
-    print("=" * 60)
-
-    # 状态文件
-    state = load_state()
-    print(f"\n📋 执行状态:")
-    print(f"   上次处理日期: {state.get('last_processed_date', '从未执行')}")
-    print(f"   上次检查时间: {state.get('last_check_time', 'N/A')}")
-    if state.get('last_error'):
-        print(f"   ⚠️  上次错误: {state.get('last_error')}")
-
-    # 待处理邮件
-    print(f"\n📧 待处理邮件:")
-    db_status = email_db.get_status()
-    print(f"   📊 数据库: 总计 {db_status['total']}, 待处理 {db_status['pending']}, 已处理 {db_status['processed']}, 今日 {db_status['today']}")
-    pending_emails = email_db.get_pending_emails(limit=20)
-    if pending_emails:
-        print(f"   ✅ 当前待处理 {len(pending_emails)} 封（显示最近 {min(len(pending_emails), 20)} 封）")
-        sources = {}
-        for email in pending_emails:
-            from_addr = email.get('from', 'Unknown')
-            if '@' in from_addr:
-                domain = from_addr.split('@')[1].split('>')[0]
-                sources[domain] = sources.get(domain, 0) + 1
-        if sources:
-            print(f"   📮 来源分布: {', '.join([f'{k}({v})' for k, v in sources.items()])}")
-        for email in pending_emails[:5]:
-            print(f"   - [{email.get('id')}] {email.get('subject', '(无主题)')} | {email.get('from', 'Unknown')}")
-    else:
-        print(f"   📭 没有待处理的邮件")
-
-    if os.path.exists(PENDING_FILE):
-        print(f"   ℹ️  兼容文件仍存在: {PENDING_FILE}（状态展示已不再依赖它）")
-
-    # 报告文件
-    print(f"\n📊 报告文件:")
-    report = check_for_report()
-    if report:
-        file_size = os.path.getsize(report)
-        preview = get_report_preview(report)
-        print(f"   ✅ 报告已生成")
-        print(f"   📁 {report}")
-        print(f"   📏 大小: {file_size:,} bytes")
-        print(f"   👁️ 预览: {preview}")
-    else:
-        print(f"   📭 没有生成的报告")
-
-    # 日志文件
-    print(f"\n📝 日志:")
-    if os.path.exists(LOG_FILE):
-        file_size = os.path.getsize(LOG_FILE)
-        # 获取最后几行
-        with open(LOG_FILE, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            last_lines = lines[-5:] if len(lines) > 5 else lines
-        print(f"   ✅ 日志文件存在: {LOG_FILE} ({file_size:,} bytes)")
-        print(f"   最近日志:")
-        for line in last_lines:
-            print(f"      {line.strip()}")
-    else:
-        print(f"   📭 没有日志文件")
-
-    print()
+    print(
+        app_runtime_status_report.build_status_report(
+            load_state_fn=load_state,
+            email_db_module=email_db,
+            check_for_report_fn=check_for_report,
+            get_report_preview_fn=get_report_preview,
+            log_file=LOG_FILE,
+        )
+    )
 
 
 def main():
     """主程序"""
+    return run_entrypoint(
+        force_mode="--force" in sys.argv,
+        check_mode="--check" in sys.argv,
+        analyze_mode="--analyze" in sys.argv,
+        supplement_mode="--supplement" in sys.argv,
+        acquire_analysis_lock_for_run=True,
+        print_banner=True,
+    )
+
+
+def run_entrypoint(
+    *,
+    force_mode: bool = False,
+    check_mode: bool = False,
+    analyze_mode: bool = False,
+    supplement_mode: bool = False,
+    acquire_analysis_lock_for_run: bool = True,
+    print_banner: bool = True,
+) -> int:
     primary_model = load_llm_config().get("model", "unknown")
-    print("=" * 60)
-    print(f"🚀 LLM 邮件自动处理中 - {primary_model}")
-    print("=" * 60)
-    print(f"当前时间: {datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')} (北京时间)")
-    print()
+    if print_banner:
+        print("=" * 60)
+        print(f"🚀 LLM 邮件自动处理中 - {primary_model}")
+        print("=" * 60)
+        print(f"当前时间: {datetime.now(BJT).strftime('%Y-%m-%d %H:%M:%S')} (北京时间)")
+        print()
 
     logger.info("程序启动")
 
-    force_mode = "--force" in sys.argv
-    check_mode = "--check" in sys.argv
-    analyze_mode = "--analyze" in sys.argv
-    supplement_mode = "--supplement" in sys.argv
-
-    # 如果使用 --supplement 但没有 --analyze，自动启用 --analyze
     if supplement_mode and not analyze_mode:
         analyze_mode = True
 
-    # 状态检查模式
     if check_mode:
         print_status()
-        return
+        return 0
 
-    analysis_lock = try_acquire_analysis_lock()
-    if analysis_lock is None:
-        logger.warning("⏭️ 已有分析流程运行中，跳过本次触发")
-        print("⏭️ 已有分析流程运行中，跳过本次触发")
-        return
+    analysis_lock = None
+    if acquire_analysis_lock_for_run:
+        analysis_lock = try_acquire_analysis_lock()
+        if analysis_lock is None:
+            logger.warning("⏭️ 已有分析流程运行中，跳过本次触发")
+            if print_banner:
+                print("⏭️ 已有分析流程运行中，跳过本次触发")
+            return 0
 
     try:
-        # 分析模式
         if analyze_mode:
-            logger.info("📊 分析模式：调用当前 LLM 链路分析已存在的邮件")
-
-            # 从数据库获取待处理邮件
-            emails = email_db.get_pending_emails(limit=20)
-
-            if not emails:
-                logger.warning("📭 没有待分析的邮件")
-                return
-
-            logger.info(f"📧 待分析邮件数: {len(emails)}")
-
-            # 调用当前 LLM 链路分析
-            try:
-                html_content = analyze_emails_with_llm(emails)
-            except Exception as e:
-                logger.error(f"❌ 大模型分析失败: {e}")
-                # 更新错误状态
-                state = load_state()
-                state["last_error"] = f"分析失败: {str(e)[:100]}"
-                save_state(state)
-                return
-
-            if html_content:
-                report_file = save_report(html_content, source_emails=emails)
-                if report_file:
-                    logger.info("✅ 分析完成！报告已生成")
-
-                    # 发送报告（支持补充模式）
-                    logger.info("📤 发送报告...")
-                    email_uids = [e.get("id") for e in emails if e.get("id")]
-                    email_local_ids = [e.get("local_id") for e in emails if e.get("local_id") is not None]
-                    try:
-                        send_success = send_report(
-                            report_file,
-                            email_uids=email_uids,
-                            email_local_ids=email_local_ids,
-                            is_supplement=supplement_mode,
-                        )
-                    except Exception as e:
-                        logger.error(f"❌ 发送报告失败: {e}")
-                        # 记录失败
-                        target_email = load_config().get("target", {}).get("email", "")
-                        subject_prefix = "补充分析 " if supplement_mode else ""
-                        subject = f"AI Morning Brief | {subject_prefix}{datetime.now(BJT).strftime('%Y-%m-%d %H:%M')}"
-                        try:
-                            email_db.log_sent_report(
-                                email_local_ids=email_local_ids,
-                                email_uids=email_uids,
-                                report_type="supplement" if supplement_mode else "daily",
-                                subject=subject,
-                                recipient=target_email,
-                                status="failed",
-                            )
-                        except Exception:
-                            pass
-                        return
-
-                    if send_success:
-                        logger.info("✅ 邮件已完成发送与状态落库")
-                    else:
-                        logger.warning("⚠️ 发送失败，邮件保留为待处理状态")
-
-                    if supplement_mode:
-                        logger.info("✅ 补充分析完成，已单独推送")
-                else:
-                    logger.error("❌ 保存报告失败")
-            else:
-                logger.error("❌ 大模型分析失败")
-            return
-
-        # 正常模式
-        if force_mode:
-            logger.warning("⚠️ 强制模式（忽略时间检查）")
-        elif not should_trigger():
-            logger.info("⏰ 今天已经处理过，跳过")
-            print("提示: 使用 --force 强制运行，或 --check 检查状态")
-            return
-
-        # 第一步：收取邮件
-        logger.info("【步骤 1/4】收取邮件...")
-        try:
-            fetch_emails(limit=20)
-        except Exception as e:
-            logger.error(f"❌ 收取邮件失败: {e}")
-            state = load_state()
-            state["last_error"] = f"收取邮件失败: {str(e)[:100]}"
-            save_state(state)
-            return
-
-        # 从数据库读取待处理邮件（本次分析的唯一来源）
-        emails = email_db.get_pending_emails(limit=20)
-        if not emails:
-            logger.warning("📭 没有待处理的邮件")
-            return
-        logger.info(f"📭 待处理邮件数: {len(emails)}")
-
-        # 第二步：AI 分析
-        logger.info("【步骤 2/4】LLM / 备用链路分析...")
-
-        try:
-            html_content = analyze_emails_with_llm(emails)
-        except Exception as e:
-            logger.error(f"❌ 大模型分析失败: {e}")
-            state = load_state()
-            state["last_error"] = f"AI分析失败: {str(e)[:100]}"
-            save_state(state)
-            return
-
-        if not html_content:
-            logger.error("❌ 大模型分析失败，跳过后续步骤")
-            return
-
-        report_file = save_report(html_content, source_emails=emails)
-        if not report_file:
-            logger.error("❌ 保存报告失败，跳过后续步骤")
-            return
-
-        # 第三步：发送报告
-        logger.info("【步骤 3/4】发送报告...")
-        try:
-            email_uids = [e.get("id") for e in emails if e.get("id")]
-            email_local_ids = [e.get("local_id") for e in emails if e.get("local_id") is not None]
-            send_success = send_report(
-                report_file,
-                email_uids=email_uids,
-                email_local_ids=email_local_ids,
-                is_supplement=supplement_mode,
+            return app_runtime_service_analysis.run_analysis_job(
+                supplement_mode=supplement_mode,
             )
-        except Exception as e:
-            logger.error(f"❌ 发送报告失败: {e}")
 
-            # 记录发送失败
-            config = load_config()
-            target_email = config.get("target", {}).get("email", "")
-            subject_prefix = "补充分析 " if supplement_mode else ""
-            subject = f"AI Morning Brief | {subject_prefix}{datetime.now(BJT).strftime('%Y-%m-%d %H:%M')}"
-            try:
-                email_db.log_sent_report(
-                    email_local_ids=email_local_ids,
-                    email_uids=email_uids,
-                    report_type="supplement" if supplement_mode else "daily",
-                    subject=subject,
-                    recipient=target_email,
-                    status="failed"
-                )
-            except Exception:
-                pass
-
-            state = load_state()
-            state["last_error"] = f"发送失败: {str(e)[:100]}"
-            save_state(state)
-            print("   ⚠️ 发送失败，保留文件待重试")
-            return
-
-        if send_success:
-            # 成功，更新状态
-            state = load_state()
-            state["last_processed_date"] = datetime.now(BJT).strftime("%Y-%m-%d")
-            state["last_check_time"] = datetime.now(BJT).isoformat()
-            state["last_error"] = None
-            save_state(state)
-            logger.info("✅ 邮件已完成发送与状态落库")
-        else:
-            # 理论上不会走到这里（send_report 失败会抛异常）；兜底防止未来行为变化
-            config = load_config()
-            target_email = config.get("target", {}).get("email", "")
-            subject_prefix = "补充分析 " if supplement_mode else ""
-            subject = f"AI Morning Brief | {subject_prefix}{datetime.now(BJT).strftime('%Y-%m-%d %H:%M')}"
-            try:
-                email_db.log_sent_report(
-                    email_local_ids=email_local_ids,
-                    email_uids=email_uids,
-                    report_type="supplement" if supplement_mode else "daily",
-                    subject=subject,
-                    recipient=target_email,
-                    status="failed",
-                )
-            except Exception:
-                pass
-            state = load_state()
-            state["last_error"] = "发送失败"
-            save_state(state)
-            print("   ⚠️ 发送失败，保留文件待重试")
-            return
-
-        # 清理
-        cleanup()
-        logger.info("✅ 流程完成")
-        print("\n✅ 流程完成")
+        app_runtime_qclaw_runner.run_normal_mode(
+            force_mode=force_mode,
+            should_trigger_fn=should_trigger,
+            fetch_emails_fn=fetch_emails,
+            email_db_module=email_db,
+            analyze_emails_with_llm_fn=analyze_emails_with_llm,
+            save_report_fn=save_report,
+            send_report_fn=send_report,
+            cleanup_fn=cleanup,
+            log_failed_report_attempt_fn=log_failed_report_attempt,
+            record_run_error_fn=lambda message: app_runtime_state.record_run_error(
+                message,
+                load_state_fn=load_state,
+                save_state_fn=save_state,
+            ),
+            record_run_success_fn=lambda: app_runtime_state.record_run_success(
+                now_fn=lambda: datetime.now(BJT),
+                load_state_fn=load_state,
+                save_state_fn=save_state,
+            ),
+            logger=logger,
+            supplement_mode=supplement_mode,
+        )
+        return 0
     finally:
-        release_analysis_lock(analysis_lock)
-
-
-# 向后兼容旧函数名，避免外部脚本和临时调试代码立即失效。
-call_kimi_api = call_llm_api
-call_kimi_api_with_retries = call_llm_api_with_retries
-generate_with_kimi = generate_with_llm
-analyze_batch_summary_with_kimi = analyze_batch_summary_with_llm
-merge_batch_summaries_with_kimi = merge_batch_summaries_with_llm
-analyze_emails_with_kimi = analyze_emails_with_llm
-
+        if acquire_analysis_lock_for_run:
+            release_analysis_lock(analysis_lock)
 
 if __name__ == "__main__":
     try:
