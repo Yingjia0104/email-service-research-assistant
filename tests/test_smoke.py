@@ -611,6 +611,35 @@ class SmokeTests(LegacySmokeMixin, unittest.TestCase):
 
         self.assertIs(selected, direct)
 
+    def test_service_analysis_multimodal_wrappers_accept_pipeline_kwargs(self):
+        from app.runtime import service_analysis
+
+        with patch.object(
+            service_analysis.app_multimodal_pipeline,
+            "classify_multimodal_images_lightweight_for_pipeline",
+            return_value={},
+        ) as classify:
+            service_analysis._classify_multimodal_images_lightweight(
+                [],
+                classification_concurrency=3,
+            )
+
+        self.assertEqual(classify.call_args.kwargs["classification_concurrency"], 3)
+
+        with patch.object(
+            service_analysis.app_multimodal_pipeline,
+            "deep_analyze_multimodal_images_for_pipeline",
+            return_value={},
+        ) as deep_analyze:
+            service_analysis._deep_analyze_multimodal_images(
+                [],
+                max_deep_analysis_images=4,
+                deep_analysis_concurrency=2,
+            )
+
+        self.assertEqual(deep_analyze.call_args.kwargs["max_deep_analysis_images"], 4)
+        self.assertEqual(deep_analyze.call_args.kwargs["deep_analysis_concurrency"], 2)
+
     def test_qclaw_get_llm_http_session_accepts_injected_sessions(self):
         import qclaw_mail_file
 

@@ -363,13 +363,14 @@ def _call_visual_deep_llm_for_pipeline(
 def _classify_multimodal_images_lightweight(
     images: List[Dict[str, Any]],
     api_config: Optional[Dict[str, Any]] = None,
+    classification_concurrency: Optional[int] = None,
 ) -> Dict[str, Dict[str, str]]:
     image_settings = _get_runtime_settings().get("image_settings") or {}
     return app_multimodal_pipeline.classify_multimodal_images_lightweight_for_pipeline(
         images,
         api_config=api_config,
         load_visual_fast_llm_config_fn=load_visual_fast_llm_config,
-        classification_concurrency=None,
+        classification_concurrency=classification_concurrency,
         default_classification_concurrency=int(image_settings.get("classification_concurrency") or 2),
         model_supports_vision_fn=app_llm_client.model_supports_vision,
         call_llm_api_with_retries_fn=_call_visual_fast_llm_for_pipeline,
@@ -381,15 +382,17 @@ def _classify_multimodal_images_lightweight(
 def _deep_analyze_multimodal_images(
     image_objects: List[Dict[str, Any]],
     api_config: Optional[Dict[str, Any]] = None,
+    max_deep_analysis_images: Optional[int] = None,
+    deep_analysis_concurrency: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     image_settings = _get_runtime_settings().get("image_settings") or {}
     return app_multimodal_pipeline.deep_analyze_multimodal_images_for_pipeline(
         image_objects,
         api_config=api_config,
         load_visual_llm_config_fn=load_visual_llm_config,
-        max_deep_analysis_images=None,
+        max_deep_analysis_images=max_deep_analysis_images,
         default_max_deep_analysis_images=image_settings.get("max_deep_analysis_images"),
-        deep_analysis_concurrency=None,
+        deep_analysis_concurrency=deep_analysis_concurrency,
         default_deep_analysis_concurrency=int(image_settings.get("deep_analysis_concurrency") or 2),
         model_supports_vision_fn=app_llm_client.model_supports_vision,
         call_llm_api_with_retries_fn=_call_visual_deep_llm_for_pipeline,
