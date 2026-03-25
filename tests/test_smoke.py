@@ -554,6 +554,77 @@ class SmokeTests(LegacySmokeMixin, unittest.TestCase):
             finally:
                 email_db.DB_FILE = original_db_file
 
+    def test_add_emails_serializes_attachment_records_as_json(self):
+        from app.storage import email_db as app_storage_email_db
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "emails.db")
+            original_db_file = app_storage_email_db.DB_FILE
+            try:
+                app_storage_email_db.DB_FILE = db_path
+                app_storage_email_db.init_db()
+
+                added = app_storage_email_db.add_emails([
+                    {
+                        "account_email": "alpha@example.com",
+                        "folder": "INBOX",
+                        "id": "101",
+                        "from": "a@example.com",
+                        "subject": "A",
+                        "date": "2026-03-16T09:00:00+08:00",
+                        "attachments": [
+                            {"filename": "deck.pdf", "kind": "file"},
+                            {"filename": "chart.png", "kind": "image"},
+                        ],
+                    }
+                ])
+
+                self.assertEqual(added, 1)
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    raw_attachments = conn.execute(
+                        "SELECT attachments FROM emails WHERE uid = ?",
+                        ("101",),
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+
+                self.assertIsInstance(raw_attachments, str)
+                parsed = json.loads(raw_attachments)
+                self.assertEqual(parsed[0]["filename"], "deck.pdf")
+                self.assertEqual(parsed[1]["kind"], "image")
+            finally:
+                app_storage_email_db.DB_FILE = original_db_file
+
+    def test_service_analysis_get_llm_http_session_accepts_injected_sessions(self):
+        from app.runtime import service_analysis
+
+        direct = object()
+        proxy = object()
+
+        selected = service_analysis.get_llm_http_session(
+            {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+            direct_session=direct,
+            proxy_session=proxy,
+        )
+
+        self.assertIs(selected, direct)
+
+    def test_qclaw_get_llm_http_session_accepts_injected_sessions(self):
+        import qclaw_mail_file
+
+        direct = object()
+        proxy = object()
+
+        selected = qclaw_mail_file.get_llm_http_session(
+            {"base_url": "https://api.openai.com/v1"},
+            direct_session=direct,
+            proxy_session=proxy,
+        )
+
+        self.assertIs(selected, proxy)
+
     def test_finalize_report_success_is_atomic_for_log_and_processed(self):
         import email_db
 

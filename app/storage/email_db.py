@@ -24,6 +24,12 @@ def _connect():
     return sqlite3.connect(DB_FILE, timeout=30)
 
 
+def _serialize_attachments(raw_attachments):
+    if raw_attachments is None or isinstance(raw_attachments, str):
+        return raw_attachments
+    return json.dumps(raw_attachments, ensure_ascii=False)
+
+
 def _column_names(cursor, table_name: str) -> set:
     """获取表字段名集合。"""
     cursor.execute(f"PRAGMA table_info({table_name})")
@@ -262,7 +268,7 @@ def add_emails(emails: list):
             email.get("subject"),
             email.get("date"),
             email.get("body"),
-            email.get("attachments"),
+            _serialize_attachments(email.get("attachments")),
             datetime.now(BJT).isoformat()
         ))
         count += cursor.rowcount
