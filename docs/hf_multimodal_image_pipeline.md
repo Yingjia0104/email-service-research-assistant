@@ -25,6 +25,83 @@
 
 ---
 
+## 1.1 参数与 Cutoff 总表
+
+这部分只记录“当前真实会生效的参数和截断点”，方便排查行为时快速定位。
+
+### 主入口 Wrapper
+
+服务分析入口和 CLI 入口当前都对齐成这两组 wrapper：
+
+- 轻分类 wrapper
+  - `images, api_config=None, classification_concurrency=None`
+  - 服务入口见 [`app/runtime/service_analysis.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/runtime/service_analysis.py#L363)
+  - CLI 入口见 [`qclaw_mail_file.py`](/Users/yyukichen/Desktop/email-service-research-assistant/qclaw_mail_file.py#L526)
+- 深分析 wrapper
+  - `image_objects, api_config=None, max_deep_analysis_images=None, deep_analysis_concurrency=None`
+  - 服务入口见 [`app/runtime/service_analysis.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/runtime/service_analysis.py#L382)
+  - CLI 入口见 [`qclaw_mail_file.py`](/Users/yyukichen/Desktop/email-service-research-assistant/qclaw_mail_file.py#L544)
+
+### 配置项、默认值和当前值
+
+这些值统一从 [`app/config.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/config.py#L73) 的 `DEFAULT_IMAGE_PIPELINE_SETTINGS` 和 `build_image_pipeline_settings()` 解析出来。
+
+| 配置项 | 默认值 | 当前值 | 生效位置 | 说明 |
+| --- | --- | --- | --- | --- |
+| `multimodal.max_images` | `50` | `50` | [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L664) | Step 1 收图总量上限；超过后按优先级截断 |
+| `multimodal.max_deep_analysis_images` | `15` | `0 -> None` | [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L1044) | 当前配置 `0` 会被归一成“不限量” |
+| `multimodal.classification_concurrency` | `2` | `2` | [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L998) | 轻分类并发数 |
+| `multimodal.deep_analysis_concurrency` | `2` | `2` | [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L1210) | 深分析并发数 |
+| `multimodal.max_inline_visual_contexts` | `None` | `None` | [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L794) | 邮件级 inline visual context 数量上限；当前不截断 |
+| `multimodal.max_supporting_visual_evidence` | `None` | `None` | [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L817) | 邮件级 supporting evidence 数量上限；当前不截断 |
+| `multimodal.stop_new_deep_analysis_before_daily_minutes` | `None` | `3` | [`app/config.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/config.py#L248) | 当前只完成配置解析，尚未接入执行逻辑 |
+
+### 运行时额外上限
+
+除了 `multimodal.*` 配置外，还有一个只作用于主 LLM 直连多模态入口的运行时上限：
+
+- [`app/runtime/service_analysis.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/runtime/service_analysis.py#L40) 的 `MAX_MULTIMODAL_IMAGES = 20`
+- 它控制的是 `build_multimodal_user_blocks()` 最多往主 LLM 的 `user_content_blocks` 放多少张图，见 [`app/runtime/service_analysis.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/runtime/service_analysis.py#L264)
+- 这个上限和视觉上下文 pipeline 的 `multimodal.max_images=50` 不是同一个概念
+
+### 各层 Cutoff
+
+按链路顺序看，当前真实会生效的 cutoff 如下：
+
+1. 收图前置过滤
+   - 单图体积超过 `4MB` 直接跳过，见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L579)
+   - 同一封邮件内按 `data_url` 去重，见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L574)
+2. 本地 prescreen cutoff
+   - 最短边 `< 90`
+   - 面积 `< 25000`
+   - 长宽比 `>= 8.0`
+   - 文件名命中 `logo/header/footer/spacer/divider/banner/signature/icon`
+   - 规则定义见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L9) 和 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L159)
+3. Step 1 总量上限
+   - `selected_images = prioritized_candidates[:max_multimodal_images]`
+   - 当前上限是 `50`
+   - 见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L664)
+4. 轻分类批次 cutoff
+   - 每批 `6` 张图
+   - 并发由 `classification_concurrency` 控制
+   - 见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L902)
+5. 深分析入选 cutoff
+   - 只分析 `narrative_priority != "skip"` 的图
+   - 过滤空 `image_type`、`low_value_visual` 和 `decorative`
+   - 见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L1029)
+6. 深分析数量上限
+   - `max_deep_analysis_images` 为正整数时，按优先级截到前 N 张
+   - 当前值为不限量
+   - 见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L1044)
+7. 单图深分析输出 cutoff
+   - `supporting_details` 最多保留 `3` 条
+   - 见 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py#L1167)
+8. 主 LLM 直连多模态 blocks 上限
+   - `service_analysis` 当前最多塞 `20` 张图
+   - 见 [`app/runtime/service_analysis.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/runtime/service_analysis.py#L40)
+
+---
+
 ## 2. 主入口
 
 图片链路主入口在 [`app/pipeline/multimodal_pipeline.py`](/Users/yyukichen/Desktop/email-service-research-assistant/app/pipeline/multimodal_pipeline.py)：

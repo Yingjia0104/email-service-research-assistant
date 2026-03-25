@@ -1459,7 +1459,7 @@ class SmokeTests(LegacySmokeMixin, unittest.TestCase):
 
         self.assertEqual(len(blocks), 2)
 
-    def test_build_multimodal_user_blocks_caps_image_count_at_eight(self):
+    def test_build_multimodal_user_blocks_caps_image_count_at_runtime_limit(self):
         import qclaw_mail_file
 
         attachments = []
