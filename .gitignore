@@ -27,6 +27,7 @@ Thumbs.db
 qclaw_state.json
 .qclaw_state.json
 pending_emails.json
+.analysis.lock
 AI_Morning_Brief_*.html
 reference_brief.html
 config.yaml
@@ -34,6 +35,7 @@ emails.db
 backups/
 .eml
 send_msg_parsed.py
+sample-emails-*/
 
 # Environment
 .env
