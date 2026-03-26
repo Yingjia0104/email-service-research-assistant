@@ -228,13 +228,19 @@ def llm_should_bypass_proxy(api_config: Dict[str, Any]) -> bool:
     return app_llm_client.llm_should_bypass_proxy(api_config)
 
 
-def get_llm_http_session(api_config: Dict[str, Any]):
+def get_llm_http_session(
+    api_config: Dict[str, Any],
+    *,
+    direct_session=None,
+    proxy_session=None,
+):
     """返回当前 LLM 请求应使用的 HTTP session。"""
-    direct_session, proxied_session = _ensure_llm_sessions()
+    direct_session = direct_session or _ensure_llm_sessions()[0]
+    proxy_session = proxy_session or _ensure_llm_sessions()[1]
     return app_llm_client.get_llm_http_session(
         api_config,
         direct_session=direct_session,
-        proxy_session=proxied_session,
+        proxy_session=proxy_session,
     )
 
 

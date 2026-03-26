@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 import re
 from datetime import datetime
 from email.utils import parseaddr
@@ -82,12 +83,12 @@ def build_attachment_records(
         return attachment_contents, embedded_images, attachment_records
 
     for att in msg.attachments:
-        if not att.filename:
+        filename = resolve_attachment_filename(att)
+        if not filename:
             continue
 
-        filename = att.filename
         lower_filename = filename.lower()
-        content_type = getattr(att, "content_type", "") or "application/octet-stream"
+        content_type = getattr(att, "content_type", "") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         try:
             att_data = extract_attachment_bytes_fn(att)
@@ -179,6 +180,15 @@ def build_attachment_records(
             continue
 
     return attachment_contents, embedded_images, attachment_records
+
+
+def resolve_attachment_filename(att: Any) -> str:
+    """兼容 extract_msg 附件只暴露 longFilename/displayName 的情况。"""
+    for attr in ("filename", "longFilename", "shortFilename", "displayName", "name"):
+        value = getattr(att, attr, None)
+        if value:
+            return str(value).strip()
+    return ""
 
 
 def get_message_local_date(msg_datetime, local_tz):

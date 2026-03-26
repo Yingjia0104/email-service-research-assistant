@@ -197,12 +197,18 @@ def sanitize_email_body(body: str) -> str:
     )
 
 
-def get_llm_http_session(api_config: Dict[str, Any]):
-    direct_session, proxied_session = _ensure_llm_sessions()
+def get_llm_http_session(
+    api_config: Dict[str, Any],
+    *,
+    direct_session=None,
+    proxy_session=None,
+):
+    direct_session = direct_session or _ensure_llm_sessions()[0]
+    proxy_session = proxy_session or _ensure_llm_sessions()[1]
     return app_llm_client.get_llm_http_session(
         api_config,
         direct_session=direct_session,
-        proxy_session=proxied_session,
+        proxy_session=proxy_session,
     )
 
 

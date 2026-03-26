@@ -1,0 +1,165 @@
+{
+  "experiment": "pipeline_abc",
+  "worktree": "/private/tmp/email-service-research-assistant-latest",
+  "branch": "experiment/latest-git-main",
+  "head_commit": "61667bff88dd31d674c2246d00c8f5f0a3b4ad6f",
+  "baseline_commit": "61667bf",
+  "sample_dirs": [
+    "/private/tmp/email-service-research-assistant-latest/sample-emails-0313"
+  ],
+  "sample_count": 4,
+  "generated_at": "2026-03-26T00:40:21+0800",
+  "config_path": "/var/folders/pq/x9m5nj3d659dgyg_98cpgvgr0000gn/T/experiment_pipeline_abc_7ghcgxoj.yaml",
+  "groups": {
+    "a": {
+      "group": "A",
+      "mode": "纯文本基线",
+      "email_count": 4,
+      "total_runtime_seconds": 299.433,
+      "non_llm_runtime_seconds": 0.037,
+      "num_llm_calls": 3,
+      "llm_runtime_seconds": 299.396,
+      "avg_llm_call_seconds": 99.799,
+      "median_llm_call_seconds": 86.959,
+      "models_used": [
+        "qwen3-max"
+      ],
+      "stage_summary": {
+        "report_generation": {
+          "count": 3,
+          "duration_seconds": 299.396,
+          "models": [
+            "qwen3-max"
+          ],
+          "multimodal_calls": 0,
+          "success_count": 3
+        }
+      },
+      "image_summary": {
+        "total_images": 53,
+        "dropped_images": 3,
+        "deprioritized_images": 0,
+        "sent_images": 50
+      },
+      "actual_skipped_images": 53
+    },
+    "b": {
+      "group": "B",
+      "mode": "正式图片链路",
+      "email_count": 4,
+      "total_runtime_seconds": 1090.32,
+      "non_llm_runtime_seconds": 0.0,
+      "num_llm_calls": 63,
+      "llm_runtime_seconds": 1843.905,
+      "avg_llm_call_seconds": 29.268,
+      "median_llm_call_seconds": 24.853,
+      "models_used": [
+        "qwen-vl-max-latest",
+        "qwen3-max",
+        "qwen3-vl-235b-a22b-thinking"
+      ],
+      "stage_summary": {
+        "deep_analysis": {
+          "count": 51,
+          "duration_seconds": 1463.531,
+          "models": [
+            "qwen-vl-max-latest",
+            "qwen3-vl-235b-a22b-thinking"
+          ],
+          "multimodal_calls": 51,
+          "success_count": 49
+        },
+        "lightweight_classification": {
+          "count": 9,
+          "duration_seconds": 57.968,
+          "models": [
+            "qwen-vl-max-latest"
+          ],
+          "multimodal_calls": 9,
+          "success_count": 9
+        },
+        "report_generation": {
+          "count": 3,
+          "duration_seconds": 322.405,
+          "models": [
+            "qwen3-max"
+          ],
+          "multimodal_calls": 0,
+          "success_count": 3
+        }
+      },
+      "image_summary": {
+        "total_images": 53,
+        "dropped_images": 3,
+        "deprioritized_images": 0,
+        "sent_images": 50
+      },
+      "prescreen_candidate_images": 50,
+      "lightweight_classification_count": 32,
+      "deep_analysis_count": 31,
+      "visual_context_ready_emails": 3,
+      "visual_status_distribution": {
+        "ready": 3,
+        "empty": 1
+      },
+      "classification_concurrency": 2,
+      "deep_analysis_concurrency": 2,
+      "lightweight_models": [
+        "qwen-vl-max-latest"
+      ],
+      "deep_analysis_models": [
+        "qwen-vl-max-latest",
+        "qwen3-vl-235b-a22b-thinking"
+      ],
+      "image_caps_disabled": {
+        "max_multimodal_images": null,
+        "max_deep_analysis_images": null
+      }
+    },
+    "c": {
+      "group": "C",
+      "mode": "文本+原始图片直塞主模型",
+      "email_count": 4,
+      "total_runtime_seconds": 312.826,
+      "non_llm_runtime_seconds": 0.606,
+      "num_llm_calls": 3,
+      "llm_runtime_seconds": 312.22,
+      "avg_llm_call_seconds": 104.073,
+      "median_llm_call_seconds": 99.924,
+      "models_used": [
+        "qwen3-max"
+      ],
+      "stage_summary": {
+        "report_generation": {
+          "count": 3,
+          "duration_seconds": 312.22,
+          "models": [
+            "qwen3-max"
+          ],
+          "multimodal_calls": 2,
+          "success_count": 3
+        }
+      },
+      "image_summary": {
+        "total_images": 53,
+        "dropped_images": 3,
+        "deprioritized_images": 0,
+        "sent_images": 50
+      },
+      "sent_images_to_main_model": 50,
+      "main_model_call_count": 3,
+      "main_models": [
+        "qwen3-max"
+      ],
+      "multimodal_fallback_to_text": false,
+      "image_caps_disabled": {
+        "max_multimodal_images": null,
+        "max_deep_analysis_images": null
+      }
+    }
+  },
+  "runtime_deltas_vs_a": {
+    "b_minus_a_seconds": 790.887,
+    "c_minus_a_seconds": 13.393
+  }
+}
